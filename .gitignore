@@ -1,5 +1,7 @@
 data.db
 storefront_build/
+uploads/
+backups/
 __pycache__/
 .installed_version
 *.new

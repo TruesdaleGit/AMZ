@@ -1,7 +1,7 @@
 """Updates Seller Toolkit to the latest version from GitHub.
 
-Replaces the program files only. Your data (data.db) and any built website
-(storefront_build) are never touched. Uses only the Python standard library.
+Replaces the program files only. Your data (data.db), uploaded photos, backups and any
+built website are never touched. Uses only the Python standard library.
 """
 import io
 import json
@@ -14,7 +14,7 @@ REPO = "TruesdaleGit/AMZ"
 BRANCH = "main"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 VERSION_FILE = os.path.join(APP_DIR, ".installed_version")
-KEEP = {"data.db", "storefront_build", ".installed_version"}  # never overwritten
+KEEP = {"data.db", "storefront_build", ".installed_version", "uploads", "backups"}  # never overwritten
 
 
 def fetch(url):

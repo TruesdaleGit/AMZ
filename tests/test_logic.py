@@ -87,6 +87,43 @@ class Listings(unittest.TestCase):
         self.assertEqual(errors, [])
 
 
+class Additions(unittest.TestCase):
+    def test_currency_and_price_breaks(self):
+        quote = {"unit_cost": 20, "fx_rate": 0.14, "duty_pct": 10, "freight_per_unit": 1, "price_breaks": "1000: 18, 500:19, junk"}
+        self.assertEqual(logic.landed_cost(quote), 4.08)
+        self.assertEqual([t["quantity"] for t in logic.price_breaks(quote)], [500, 1000])
+        self.assertEqual(logic.landed_cost({"unit_cost": 3}), 3)  # quotes saved before currency existed
+
+    def test_score_weights_change_ranking_and_total_100(self):
+        product = {"price": 30, "monthly_sales": 400, "reviews": 3000, "rating": 4.7, "weight_lb": 5}
+        eco = logic.unit_economics(product, None, SETTINGS)
+        default = logic.opportunity_score(product, eco, SETTINGS)
+        demand_only = logic.opportunity_score(product, eco, {**SETTINGS, "w_competition": "0", "w_rating": "0", "w_size": "0", "w_margin": "0", "w_price": "0"})
+        self.assertEqual(round(sum(default["weights"].values())), 100)
+        self.assertEqual(demand_only["score"], 100)
+        self.assertLess(default["score"], 60)
+
+    def test_keyword_priority_order(self):
+        self.assertGreater(logic.keyword_priority(12000, 300), logic.keyword_priority(12000, 30000))
+        self.assertGreater(logic.keyword_priority(12000, 300), logic.keyword_priority(300, 300))
+
+    def test_review_themes(self):
+        result = logic.analyze_reviews("Broke after a week, flimsy plastic.\nLove it, works great every day\nFlimsy plastic and it leaks everywhere")
+        themes = {t["theme"]: t["count"] for t in result["themes"]}
+        self.assertEqual(result["review_count"], 3)
+        self.assertEqual(themes["Cheap or flimsy feel"], 2)
+        self.assertEqual(themes["Leaks"], 1)
+        self.assertIn({"phrase": "flimsy plastic", "count": 2}, result["phrases"])
+        self.assertEqual(logic.analyze_reviews("")["review_count"], 0)
+
+    def test_xlsx_is_a_valid_zip_with_escaped_text(self):
+        import io, zipfile, xlsx
+        data = xlsx.workbook(["A & B"], [["<x>", 1.5, None]])
+        sheet = zipfile.ZipFile(io.BytesIO(data)).read("xl/worksheets/sheet1.xml").decode()
+        self.assertIn("&lt;x&gt;", sheet)
+        self.assertIn("<v>1.5</v>", sheet)
+
+
 class Csv(unittest.TestCase):
     def test_header_aliases_and_number_cleanup(self):
         rows, fields = logic.parse_csv('﻿Title,Review Count,Price,Junk\n"Mat, large",1,"$1,234.50",x\n', logic.PRODUCT_ALIASES)

@@ -4,6 +4,7 @@
 Run:  double-click "Start Seller Toolkit.bat", or  python app.py  then open http://127.0.0.1:8765
 Uses only the Python standard library. Data is stored in data.db next to this file.
 """
+import base64
 import csv
 import datetime
 import io
@@ -11,6 +12,7 @@ import json
 import math
 import mimetypes
 import os
+import secrets
 import sys
 import threading
 import urllib.request
@@ -22,9 +24,12 @@ from urllib.parse import parse_qs, urlparse
 import db
 import logic
 import storefront
+import xlsx
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(ROOT, "static")
+UPLOAD_DIR = os.path.join(ROOT, "uploads")
+IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("PORT", "8765"))
 
@@ -44,10 +49,12 @@ def build_state(conn, days=30):
     quotes = db.rows(conn, "SELECT * FROM quotes ORDER BY id")
     listings = db.rows(conn, "SELECT * FROM listings")
     supplier_names = {s["id"]: s["name"] for s in suppliers}
+    product_names = {p["id"]: p["name"] for p in products}
 
     quotes_by_product = {}
     for quote in quotes:
         quote["landed_cost"] = logic.landed_cost(quote)
+        quote["tiers"] = logic.price_breaks(quote)
         quote["supplier_name"] = supplier_names.get(quote["supplier_id"], "?")
         quotes_by_product.setdefault(quote["product_id"], []).append(quote)
 
@@ -57,48 +64,92 @@ def build_state(conn, days=30):
         chosen[product["id"]] = quote
         eco = logic.unit_economics(product, quote, settings)
         product["eco"] = eco
-        product["score"] = logic.opportunity_score(product, eco)
+        product["score"] = logic.opportunity_score(product, eco, settings)
         product["min_price"] = logic.min_price_for_margin(product, quote, settings)
         product["scenarios"] = logic.price_scenarios(product, quote, settings)
         product["quote_count"] = len(quotes_by_product.get(product["id"], []))
         product["active_quote_id"] = quote["id"] if quote else None
 
+    versions = db.rows(conn, "SELECT id, listing_id, saved_at, label FROM listing_versions ORDER BY id DESC")
     for listing in listings:
         listing["issues"] = logic.validate_listing(listing)
+        listing["versions"] = [v for v in versions if v["listing_id"] == listing["id"]]
 
+    keywords = db.rows(conn, "SELECT * FROM keywords")
+    for keyword in keywords:
+        keyword["priority"] = logic.keyword_priority(keyword["search_volume"], keyword["competing_products"])
+    keywords.sort(key=lambda k: (-k["priority"], -k["search_volume"]))
+
+    competitors = db.rows(conn, "SELECT * FROM competitors ORDER BY name")
+    snapshots = db.rows(conn, "SELECT * FROM snapshots ORDER BY date, id")
+    for competitor in competitors:
+        competitor["snapshots"] = [s for s in snapshots if s["competitor_id"] == competitor["id"]]
+
+    orders = db.rows(conn, "SELECT * FROM purchase_orders ORDER BY CASE WHEN order_date = '' THEN 1 ELSE 0 END, order_date DESC, id DESC")
+    for order in orders:
+        goods = order["quantity"] * order["unit_cost"]
+        order["goods_cost"] = round(goods, 2)
+        order["deposit"] = round(goods * order["deposit_pct"] / 100, 2)
+        order["balance"] = round(goods - order["deposit"] + order["freight_total"], 2)
+        order["total_cost"] = round(goods + order["freight_total"], 2)
+        order["product_name"] = product_names.get(order["product_id"], "?")
+        order["supplier_name"] = supplier_names.get(order["supplier_id"], "")
+
+    reviews = db.rows(conn, "SELECT * FROM reviews")
+    for review in reviews:
+        review["analysis"] = logic.analyze_reviews(review["text"])
+
+    overheads = db.rows(conn, "SELECT * FROM overheads ORDER BY name")
+    dashboard = build_dashboard(conn, products, chosen, settings, days, overheads)
     return {
         "settings": settings,
         "products": products,
         "suppliers": suppliers,
         "quotes": quotes,
         "listings": listings,
-        "dashboard": build_dashboard(conn, products, chosen, settings, days),
+        "keywords": keywords,
+        "competitors": competitors,
+        "tasks": db.rows(conn, "SELECT * FROM tasks ORDER BY position, id"),
+        "orders": orders,
+        "reviews": reviews,
+        "overheads": overheads,
+        "ads": build_ads(conn, products, days),
+        "cashflow": build_cashflow(conn, products, orders, overheads, settings),
+        "dashboard": dashboard,
         "site_built": os.path.isfile(os.path.join(storefront.BUILD_DIR, "index.html")),
+        "today": datetime.date.today().isoformat(),
     }
 
 
-def build_dashboard(conn, products, chosen, settings, days):
+def _sales_profit(row, eco):
+    """Profit pieces for a block of sales of one product."""
+    units, revenue = row["units"] or 0, row["revenue"] or 0
+    fees = revenue * eco["referral_pct"] / 100 + units * eco["fba_fee"]
+    cogs = units * eco["landed_cost"]
+    ad, refunds = row["ad_spend"] or 0, row["refunds"] or 0
+    return units, revenue, fees, cogs, ad, refunds, revenue - fees - cogs - ad - refunds
+
+
+def build_dashboard(conn, products, chosen, settings, days, overheads):
     today = datetime.date.today()
     since = (today - datetime.timedelta(days=days)).isoformat() if days else "0000-00-00"
     since_30 = (today - datetime.timedelta(days=30)).isoformat()
     window = {r["product_id"]: r for r in db.rows(conn, """
         SELECT product_id, SUM(units) units, SUM(revenue) revenue, SUM(ad_spend) ad_spend,
-               SUM(refunds) refunds FROM sales WHERE date >= ? GROUP BY product_id""", (since,))}
+               SUM(refunds) refunds, SUM(sales_tax) sales_tax FROM sales WHERE date >= ? GROUP BY product_id""", (since,))}
     recent = {r["product_id"]: r["units"] or 0 for r in db.rows(conn, """
         SELECT product_id, SUM(units) units FROM sales WHERE date >= ? GROUP BY product_id""", (since_30,))}
+    by_id = {p["id"]: p for p in products}
 
     per_product, inventory = [], []
     totals = {k: 0.0 for k in ("units", "revenue", "amazon_fees", "cogs", "ad_spend", "refunds", "profit")}
-    assumed = False
+    assumed, sales_tax = False, 0.0
     for product in products:
         eco = product["eco"]
         sold = window.get(product["id"])
         if sold:
-            units, revenue = sold["units"] or 0, sold["revenue"] or 0
-            fees = revenue * eco["referral_pct"] / 100 + units * eco["fba_fee"]
-            cogs = units * eco["landed_cost"]
-            ad, refunds = sold["ad_spend"] or 0, sold["refunds"] or 0
-            profit = revenue - fees - cogs - ad - refunds
+            units, revenue, fees, cogs, ad, refunds, profit = _sales_profit(sold, eco)
+            sales_tax += sold["sales_tax"] or 0
             assumed = assumed or eco["cost_source"] == "assumed"
             row = {"product_id": product["id"], "name": product["name"], "units": units,
                    "revenue": round(revenue, 2), "amazon_fees": round(fees, 2), "cogs": round(cogs, 2),
@@ -134,13 +185,141 @@ def build_dashboard(conn, products, chosen, settings, days):
                               "lead_time_days": lead, "lead_source": "quote" if quote.get("lead_time_days") else "default",
                               "reorder_point": reorder_point, "suggested_order": order_qty, "status": status})
 
+    # Overheads are monthly; charge them for the length of the period shown.
+    monthly_overhead = sum(o["monthly_amount"] or 0 for o in overheads)
+    first_sale = conn.execute("SELECT MIN(date) FROM sales").fetchone()[0]
+    if days:
+        period_days = days
+    elif first_sale:
+        period_days = (today - datetime.date.fromisoformat(first_sale[:10])).days + 1
+    else:
+        period_days = 0
+    overhead = monthly_overhead * period_days / 30 if totals["revenue"] or days else 0
+
     per_product.sort(key=lambda r: r["profit"], reverse=True)
+    totals["product_profit"] = totals["profit"]
+    totals["overheads"] = overhead
+    totals["profit"] -= overhead
+    totals["sales_tax"] = sales_tax
     totals = {k: round(v, 2) for k, v in totals.items()}
     totals["margin_pct"] = round(totals["profit"] / totals["revenue"] * 100, 1) if totals["revenue"] else 0.0
     totals["tacos_pct"] = round(totals["ad_spend"] / totals["revenue"] * 100, 1) if totals["revenue"] else 0.0
+
+    # Month-by-month trend, last 12 months that have sales.
+    months = {}
+    for r in db.rows(conn, """SELECT substr(date, 1, 7) month, product_id, SUM(units) units, SUM(revenue) revenue,
+                              SUM(ad_spend) ad_spend, SUM(refunds) refunds FROM sales GROUP BY month, product_id"""):
+        product = by_id.get(r["product_id"])
+        if not product:
+            continue
+        units, revenue, *_, profit = _sales_profit(r, product["eco"])
+        entry = months.setdefault(r["month"], {"month": r["month"], "units": 0, "revenue": 0.0, "profit": -monthly_overhead})
+        entry["units"] += units
+        entry["revenue"] += revenue
+        entry["profit"] += profit
+    monthly = [{**m, "revenue": round(m["revenue"], 2), "profit": round(m["profit"], 2)}
+               for _, m in sorted(months.items())][-12:]
+
     return {"days": days, "totals": totals, "per_product": per_product, "inventory": inventory,
-            "uses_assumed_cost": assumed,
+            "monthly": monthly, "monthly_overhead": round(monthly_overhead, 2), "uses_assumed_cost": assumed,
             "sales_rows": conn.execute("SELECT COUNT(*) FROM sales").fetchone()[0]}
+
+
+def build_ads(conn, products, days):
+    """Ad performance by campaign and keyword, judged against each product's break-even."""
+    since = (datetime.date.today() - datetime.timedelta(days=days)).isoformat() if days else ""
+    by_id = {p["id"]: p for p in products}
+    out = []
+    for r in db.rows(conn, """SELECT product_id, campaign, keyword, SUM(impressions) impressions, SUM(clicks) clicks,
+                              SUM(spend) spend, SUM(sales) sales, SUM(orders) orders FROM ads
+                              WHERE date = '' OR date >= ? GROUP BY product_id, campaign, keyword""", (since,)):
+        product = by_id.get(r["product_id"])
+        if not product:
+            continue
+        break_even = product["eco"]["break_even_acos_pct"]
+        spend, sales = r["spend"] or 0, r["sales"] or 0
+        acos = spend / sales * 100 if sales else None
+        if spend <= 0:
+            verdict = "no spend"
+        elif acos is None:
+            verdict = "no sales"
+        elif acos > break_even:
+            verdict = "losing money"
+        elif acos > break_even * 0.7:
+            verdict = "thin"
+        else:
+            verdict = "profitable"
+        out.append({"product_id": r["product_id"], "campaign": r["campaign"], "keyword": r["keyword"],
+                    "impressions": r["impressions"] or 0, "clicks": r["clicks"] or 0, "spend": round(spend, 2),
+                    "sales": round(sales, 2), "orders": r["orders"] or 0,
+                    "acos_pct": round(acos, 1) if acos is not None else None,
+                    "cpc": round(spend / r["clicks"], 2) if r["clicks"] else None,
+                    "break_even_acos_pct": break_even, "verdict": verdict,
+                    # what the spend cost after the margin it earned back
+                    "net": round(sales * break_even / 100 - spend, 2)})
+    out.sort(key=lambda r: r["net"])
+    return out
+
+
+def _month_add(year, month, offset):
+    index = year * 12 + (month - 1) + offset
+    return index // 12, index % 12 + 1
+
+
+def build_cashflow(conn, products, orders, overheads, settings, months=6):
+    """Six-month cash projection from recent sales pace, planned orders and overheads."""
+    today = datetime.date.today()
+    since_30 = (today - datetime.timedelta(days=30)).isoformat()
+    recent = {r["product_id"]: r for r in db.rows(conn, """
+        SELECT product_id, SUM(units) units, SUM(revenue) revenue, SUM(ad_spend) ad_spend
+        FROM sales WHERE date >= ? GROUP BY product_id""", (since_30,))}
+    daily_payout = 0.0
+    for product in products:
+        sold = recent.get(product["id"])
+        if not sold or not sold["units"]:
+            continue
+        eco = product["eco"]
+        per_day = sold["units"] / 30
+        ad_share = (sold["ad_spend"] or 0) / sold["revenue"] if sold["revenue"] else 0
+        daily_payout += per_day * (eco["price"] * (1 - ad_share) - eco["referral_fee"] - eco["fba_fee"])
+
+    growth = logic.num(settings.get("sales_growth_pct")) / 100
+    delay = min(max(logic.num(settings.get("payout_delay_days"), 14), 0), 30) / 30
+    monthly_overhead = sum(o["monthly_amount"] or 0 for o in overheads)
+
+    payments, undated = {}, 0
+    for order in orders:
+        if order["status"] in ("cancelled", "received"):
+            continue
+        due = [(order["order_date"], order["deposit"]),
+               (order["balance_due_date"] or order["expected_arrival"] or order["order_date"], order["balance"])]
+        for date, amount in due:
+            if amount <= 0:
+                continue
+            if not date:
+                undated += 1
+            elif date >= today.isoformat():
+                payments[date[:7]] = payments.get(date[:7], 0) + amount
+
+    cash = logic.num(settings.get("starting_cash"))
+    rows, previous_earned = [], daily_payout * 30
+    for i in range(months):
+        year, month = _month_add(today.year, today.month, i)
+        next_year, next_month = _month_add(year, month, 1)
+        length = (datetime.date(next_year, next_month, 1) - datetime.date(year, month, 1)).days
+        days_counted = length - (today.day - 1) if i == 0 else length
+        earned = daily_payout * days_counted * (1 + growth) ** i
+        inflow = earned * (1 - delay) + previous_earned * delay
+        previous_earned = earned
+        key = f"{year:04d}-{month:02d}"
+        po = payments.get(key, 0)
+        overhead = monthly_overhead * days_counted / length
+        cash += inflow - po - overhead
+        rows.append({"month": key, "inflow": round(inflow, 2), "po_payments": round(po, 2),
+                     "overheads": round(overhead, 2), "net": round(inflow - po - overhead, 2),
+                     "ending_cash": round(cash, 2)})
+    return {"rows": rows, "daily_payout": round(daily_payout, 2), "undated_payments": undated,
+            "starting_cash": logic.num(settings.get("starting_cash"))}
 
 
 # ---------------------------------------------------------------- writes
@@ -155,7 +334,7 @@ def clean_fields(table, data):
             out[column] = "" if value is None else str(value).strip()
         elif column in db.NULLABLE_NUMBERS:
             out[column] = None if value in (None, "") else logic.num(value)
-        elif column in ("chosen", "on_site"):
+        elif column in db.FLAGS:
             out[column] = 1 if value in (True, 1, "1", "true", "on") else 0
         else:
             out[column] = logic.num(value)
@@ -164,19 +343,24 @@ def clean_fields(table, data):
 
 def create_row(conn, table, data):
     fields = clean_fields(table, data)
-    if table in ("products", "suppliers") and not fields.get("name"):
-        raise ApiError("A name is required.")
-    if table == "sales" and not fields.get("date"):
+    required = db.REQUIRED.get(table)
+    if required and not fields.get(required):
+        raise ApiError(f"A {required} is required.")
+    if table in ("sales", "snapshots") and not fields.get("date"):
         fields["date"] = datetime.date.today().isoformat()
-    if table in ("quotes", "sales", "listings") and not fields.get("product_id"):
+    if "product_id" in db.WRITABLE[table] and not fields.get("product_id"):
         raise ApiError("Choose a product.")
     if table == "quotes" and not fields.get("supplier_id"):
         raise ApiError("Choose a supplier.")
+    if table == "snapshots" and not fields.get("competitor_id"):
+        raise ApiError("Choose a competitor.")
     columns = ", ".join(fields)
     marks = ", ".join("?" for _ in fields)
     cursor = conn.execute(f"INSERT INTO {table} ({columns}) VALUES ({marks})", list(fields.values()))
     if table == "quotes" and fields.get("chosen"):
         _unchoose_others(conn, cursor.lastrowid)
+    if table == "purchase_orders":
+        _receive_order(conn, cursor.lastrowid)
     return cursor.lastrowid
 
 
@@ -184,12 +368,25 @@ def update_row(conn, table, row_id, data):
     fields = clean_fields(table, data)
     if not fields:
         return
-    if "name" in fields and not fields["name"]:
-        raise ApiError("A name is required.")
+    required = db.REQUIRED.get(table)
+    if required in fields and not fields[required]:
+        raise ApiError(f"A {required} is required.")
     sets = ", ".join(f"{c} = ?" for c in fields)
     conn.execute(f"UPDATE {table} SET {sets} WHERE id = ?", list(fields.values()) + [row_id])
     if table == "quotes" and fields.get("chosen"):
         _unchoose_others(conn, row_id)
+    if table == "purchase_orders":
+        _receive_order(conn, row_id)
+
+
+def _receive_order(conn, order_id):
+    """The first time an order is marked received, add its units to stock."""
+    order = conn.execute("SELECT * FROM purchase_orders WHERE id = ?", (order_id,)).fetchone()
+    if not order or order["status"] != "received" or order["stock_added"]:
+        return
+    units = order["units_received"] or order["quantity"] or 0
+    conn.execute("UPDATE products SET stock_on_hand = stock_on_hand + ? WHERE id = ?", (units, order["product_id"]))
+    conn.execute("UPDATE purchase_orders SET stock_added = 1, units_received = ? WHERE id = ?", (units, order_id))
 
 
 def _unchoose_others(conn, quote_id):
@@ -201,14 +398,175 @@ def import_products(conn, text):
     parsed, fields = logic.parse_csv(text, logic.PRODUCT_ALIASES)
     if "name" not in fields:
         raise ApiError("No product name column found. Expected a header such as Name, Title or Product Name.")
-    added = skipped = 0
+    seen_names = {r["name"].strip().lower() for r in db.rows(conn, "SELECT name FROM products")}
+    seen_asins = {r["asin"].strip().lower() for r in db.rows(conn, "SELECT asin FROM products WHERE asin != ''")}
+    added = skipped = duplicates = 0
     for row in parsed:
-        if not row.get("name"):
+        name, asin = (row.get("name") or "").strip().lower(), (row.get("asin") or "").strip().lower()
+        if not name:
             skipped += 1
+        elif name in seen_names or (asin and asin in seen_asins):
+            duplicates += 1
+        else:
+            create_row(conn, "products", row)
+            seen_names.add(name)
+            if asin:
+                seen_asins.add(asin)
+            added += 1
+    return {"added": added, "skipped": skipped, "duplicates": duplicates, "columns_used": fields}
+
+
+def import_keywords(conn, product_id, text):
+    if not conn.execute("SELECT 1 FROM products WHERE id = ?", (product_id,)).fetchone():
+        raise ApiError("Choose a product.")
+    parsed, fields = logic.parse_csv(text, logic.KEYWORD_ALIASES)
+    if "keyword" not in fields:
+        raise ApiError("No keyword column found. Expected a header such as Keyword or Keyword Phrase.")
+    have = {r["keyword"].strip().lower() for r in
+            db.rows(conn, "SELECT keyword FROM keywords WHERE product_id = ?", (product_id,))}
+    added = duplicates = 0
+    for row in parsed:
+        key = (row.get("keyword") or "").strip().lower()
+        if not key:
             continue
-        create_row(conn, "products", row)
+        if key in have:
+            duplicates += 1
+            continue
+        create_row(conn, "keywords", {**row, "product_id": product_id})
+        have.add(key)
         added += 1
-    return {"added": added, "skipped": skipped, "columns_used": fields}
+    return {"added": added, "duplicates": duplicates, "columns_used": fields}
+
+
+def import_ads(conn, product_id, text):
+    if not conn.execute("SELECT 1 FROM products WHERE id = ?", (product_id,)).fetchone():
+        raise ApiError("Choose a product.")
+    parsed, fields = logic.parse_csv(text, logic.ADS_ALIASES)
+    missing = [f for f in ("spend", "sales") if f not in fields]
+    if missing:
+        raise ApiError("Missing column(s): " + ", ".join(missing) + ". Needed at least: spend, sales.")
+    added = 0
+    for row in parsed:
+        row["date"] = _parse_date(row.get("date") or "") or ""
+        create_row(conn, "ads", {**row, "product_id": product_id})
+        added += 1
+    return {"added": added, "columns_used": fields}
+
+
+def _parse_date(text):
+    text = (text or "").strip()
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%b %d, %Y", "%d/%m/%Y"):
+        try:
+            return datetime.datetime.strptime(text[:10] if fmt == "%Y-%m-%d" else text, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return None
+
+
+STANDARD_TASKS = [
+    "Validate demand and competition", "Check patents and trademarks", "Request quotes from 3 suppliers",
+    "Order and review samples", "Choose supplier and negotiate terms", "Register brand name and buy UPC/GTIN",
+    "Design logo and packaging", "Place first purchase order", "Arrange product inspection",
+    "Book freight and prepare FBA shipment", "Take product photos", "Write and check the listing",
+    "Create the listing in Seller Central", "Shipment received at Amazon", "Start ad campaigns",
+    "Request first reviews", "Publish the product on the website",
+]
+
+
+def add_standard_tasks(conn, product_id):
+    have = {r["title"] for r in db.rows(conn, "SELECT title FROM tasks WHERE product_id = ?", (product_id,))}
+    start = conn.execute("SELECT COALESCE(MAX(position), 0) FROM tasks WHERE product_id = ?", (product_id,)).fetchone()[0]
+    added = 0
+    for title in STANDARD_TASKS:
+        if title not in have:
+            added += 1
+            create_row(conn, "tasks", {"product_id": product_id, "title": title, "position": start + added})
+    return {"added": added}
+
+
+def keywords_to_listing(conn, product_id, count):
+    top = db.rows(conn, "SELECT keyword, search_volume, competing_products FROM keywords WHERE product_id = ?", (product_id,))
+    if not top:
+        raise ApiError("This product has no keywords yet.")
+    top.sort(key=lambda k: -logic.keyword_priority(k["search_volume"], k["competing_products"]))
+    text = ", ".join(k["keyword"] for k in top[:max(int(count or 15), 1)])
+    listing = conn.execute("SELECT id FROM listings WHERE product_id = ?", (product_id,)).fetchone()
+    if listing:
+        update_row(conn, "listings", listing["id"], {"keywords": text})
+    else:
+        create_row(conn, "listings", {"product_id": product_id, "keywords": text,
+                                      "brand": db.get_settings(conn).get("brand", "")})
+    return {"count": min(len(top), max(int(count or 15), 1))}
+
+
+LISTING_CONTENT = ["brand", "sku", "features", "keywords", "title", "bullet1", "bullet2", "bullet3", "bullet4",
+                   "bullet5", "description", "search_terms", "aplus"]
+
+
+def save_version(conn, product_id, label):
+    listing = conn.execute("SELECT * FROM listings WHERE product_id = ?", (product_id,)).fetchone()
+    if not listing:
+        raise ApiError("Save the listing first.")
+    data = json.dumps({k: listing[k] for k in LISTING_CONTENT})
+    conn.execute("INSERT INTO listing_versions (listing_id, saved_at, label, data) VALUES (?, ?, ?, ?)",
+                 (listing["id"], datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), (label or "").strip(), data))
+    return {"ok": True}
+
+
+def restore_version(conn, version_id):
+    version = conn.execute("SELECT * FROM listing_versions WHERE id = ?", (version_id,)).fetchone()
+    if not version:
+        raise ApiError("Version not found.", 404)
+    update_row(conn, "listings", version["listing_id"], json.loads(version["data"]))
+    return {"ok": True}
+
+
+def save_upload(data):
+    """Store an uploaded image in uploads/ and return its URL path."""
+    extension = os.path.splitext(str(data.get("name") or ""))[1].lower()
+    if extension not in IMAGE_TYPES:
+        raise ApiError("Only PNG, JPG, WEBP or GIF images can be uploaded.")
+    payload = str(data.get("data") or "")
+    if "," in payload[:100]:  # data URL prefix
+        payload = payload.split(",", 1)[1]
+    try:
+        content = base64.b64decode(payload, validate=True)
+    except ValueError:
+        raise ApiError("The upload could not be read.")
+    if not content or len(content) > 8_000_000:
+        raise ApiError("Images must be under 8 MB.")
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    name = secrets.token_hex(8) + extension
+    with open(os.path.join(UPLOAD_DIR, name), "wb") as f:
+        f.write(content)
+    return {"url": "/uploads/" + name}
+
+
+EXPORT_SKIP = {"listing_versions", "reviews"}
+
+
+def export_table(conn, table):
+    """One table as an Excel workbook, with names in place of internal ids."""
+    if table not in db.TABLES or table in EXPORT_SKIP:
+        raise ApiError("Not found.", 404)
+    products = {p["id"]: p for p in build_state(conn, 0)["products"]} if table == "products" else {}
+    names = {r["id"]: r["name"] for r in db.rows(conn, "SELECT id, name FROM products")}
+    suppliers = {r["id"]: r["name"] for r in db.rows(conn, "SELECT id, name FROM suppliers")}
+    competitors = {r["id"]: r["name"] for r in db.rows(conn, "SELECT id, name FROM competitors")}
+    lookup = {"product_id": ("product", names), "supplier_id": ("supplier", suppliers),
+              "competitor_id": ("competitor", competitors)}
+    columns = [c for c, _ in db.TABLES[table] if c != "stock_added"]
+    headers = [lookup[c][0] if c in lookup else c for c in columns]
+    extra = ["score", "profit_per_unit", "margin_pct", "landed_cost", "fba_fee"] if table == "products" else []
+    out = []
+    for row in db.rows(conn, f"SELECT * FROM {table} ORDER BY id"):
+        line = [lookup[c][1].get(row[c], "") if c in lookup else row[c] for c in columns]
+        if extra:
+            p = products[row["id"]]
+            line += [p["score"]["score"], p["eco"]["profit"], p["eco"]["margin_pct"], p["eco"]["landed_cost"], p["eco"]["fba_fee"]]
+        out.append(line)
+    pretty = [h.replace("_", " ").capitalize() for h in headers + extra]
+    return xlsx.workbook(pretty, out, table.replace("_", " ").title())
 
 
 def import_sales(conn, text):
@@ -228,14 +586,10 @@ def import_sales(conn, text):
             if row.get("product") and row["product"] not in unmatched:
                 unmatched.append(row["product"])
             continue
-        try:
-            date = datetime.date.fromisoformat(row["date"][:10]).isoformat()
-        except ValueError:
-            try:
-                date = datetime.datetime.strptime(row["date"], "%m/%d/%Y").date().isoformat()
-            except ValueError:
-                unmatched.append(f"bad date: {row['date']}")
-                continue
+        date = _parse_date(row["date"])
+        if not date:
+            unmatched.append(f"bad date: {row['date']}")
+            continue
         create_row(conn, "sales", {**row, "product_id": product_id, "date": date})
         added += 1
     return {"added": added, "unmatched": unmatched[:20], "columns_used": fields}
@@ -308,7 +662,7 @@ def outreach_message(conn, data):
 def build_site(conn):
     products = db.rows(conn, "SELECT * FROM products WHERE on_site = 1 ORDER BY name")
     listings = {l["product_id"]: l for l in db.rows(conn, "SELECT * FROM listings")}
-    return storefront.build(products, listings, db.get_settings(conn))
+    return storefront.build(products, listings, db.get_settings(conn), UPLOAD_DIR)
 
 
 def site_zip():
@@ -395,6 +749,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._file(STATIC_DIR, "index.html")
             elif parts[0] == "static":
                 self._file(STATIC_DIR, "/".join(parts[1:]))
+            elif parts[0] == "uploads":
+                self._file(UPLOAD_DIR, "/".join(parts[1:]))
             elif parts[0] == "store":
                 self._file(storefront.BUILD_DIR, "/".join(parts[1:]) or "index.html")
             else:
@@ -417,6 +773,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, site_zip(), "application/zip",
                        {"Content-Disposition": 'attachment; filename="storefront.zip"'})
             return None
+        if method == "GET" and len(parts) == 2 and parts[0] == "export" and parts[1].endswith(".xlsx"):
+            table = parts[1][:-5]
+            self._send(200, export_table(conn, table),
+                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       {"Content-Disposition": f'attachment; filename="{table}.xlsx"'})
+            return None
         if method == "GET":
             raise ApiError("Not found.", 404)
 
@@ -430,6 +792,32 @@ class Handler(BaseHTTPRequestHandler):
             return import_products(conn, data.get("csv") or "")
         if method == "POST" and route == "import/sales":
             return import_sales(conn, data.get("csv") or "")
+        if method == "POST" and route == "import/keywords":
+            return import_keywords(conn, data.get("product_id"), data.get("csv") or "")
+        if method == "POST" and route == "import/ads":
+            return import_ads(conn, data.get("product_id"), data.get("csv") or "")
+        if method == "POST" and route == "ads/clear":
+            conn.execute("DELETE FROM ads WHERE product_id = ?", (data.get("product_id"),))
+            return {"ok": True}
+        if method == "POST" and route == "tasks/template":
+            return add_standard_tasks(conn, data.get("product_id"))
+        if method == "POST" and route == "keywords/to-listing":
+            return keywords_to_listing(conn, data.get("product_id"), data.get("count"))
+        if method == "POST" and route == "listings/version":
+            return save_version(conn, data.get("product_id"), data.get("label"))
+        if method == "POST" and route == "listings/restore":
+            return restore_version(conn, data.get("version_id"))
+        if method == "DELETE" and len(parts) == 2 and parts[0] == "listing_versions" and parts[1].isdigit():
+            conn.execute("DELETE FROM listing_versions WHERE id = ?", (int(parts[1]),))
+            return {"ok": True}
+        if method == "POST" and route == "upload":
+            return save_upload(data)
+        if method == "POST" and route == "reviews":
+            existing = conn.execute("SELECT id FROM reviews WHERE product_id = ?", (data.get("product_id"),)).fetchone()
+            if existing:
+                update_row(conn, "reviews", existing["id"], {"text": data.get("text")})
+                return {"id": existing["id"]}
+            return {"id": create_row(conn, "reviews", data)}
         if method == "POST" and route == "listings/draft":
             draft_listing(conn, data.get("product_id"))
             return {"ok": True}
@@ -474,6 +862,9 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     url = f"http://{HOST}:{PORT}"
     open_browser = os.environ.get("NO_BROWSER") != "1"
+    saved = db.backup()
+    if saved:
+        print(f"Backed up your data to {saved}")
     db.init()
     try:
         server = ThreadingHTTPServer((HOST, PORT), Handler)

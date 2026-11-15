@@ -21,6 +21,18 @@ DEFAULT_SETTINGS = {
     "brand": "MyBrand",
     "your_name": "",
     "company": "",
+    # opportunity score weights (any scale; they are normalised to 100)
+    "w_demand": "25", "w_competition": "25", "w_price": "15", "w_margin": "15", "w_rating": "10", "w_size": "10",
+    # cash flow forecast
+    "starting_cash": "0",
+    "payout_delay_days": "14",
+    "sales_growth_pct": "0",
+    # website
+    "store_theme": "forest",
+    "store_description": "",
+    "about_text": "",
+    "contact_email": "",
+    "contact_text": "",
 }
 
 
@@ -82,9 +94,24 @@ def landed_cost(quote):
     """Cost to get one unit into Amazon's warehouse, from a supplier quote."""
     if not quote:
         return None
-    unit = num(quote.get("unit_cost"))
+    return _landed(quote, num(quote.get("unit_cost")))
+
+
+def _landed(quote, unit_cost):
+    """unit_cost is in the quote's currency; freight and other costs are in USD."""
+    unit = unit_cost * (num(quote.get("fx_rate"), 1) or 1)
     duty = unit * num(quote.get("duty_pct")) / 100
     return round(unit + duty + num(quote.get("freight_per_unit")) + num(quote.get("other_per_unit")), 2)
+
+
+def price_breaks(quote):
+    """Parse "1000: 2.90, 2000: 2.70" into landed cost per quantity tier."""
+    tiers = []
+    for part in re.split(r"[,;\n]", quote.get("price_breaks") or ""):
+        qty, _, price = part.partition(":")
+        if num(qty) > 0 and num(price) > 0:
+            tiers.append({"quantity": int(num(qty)), "unit_cost": num(price), "landed_cost": _landed(quote, num(price))})
+    return sorted(tiers, key=lambda t: t["quantity"])
 
 
 def pick_quote(quotes):
@@ -174,7 +201,11 @@ def _ramp(value, worst, best):
     return max(0.0, min(1.0, (value - worst) / (best - worst)))
 
 
-def opportunity_score(product, eco):
+SCORE_PARTS = [("demand", "w_demand"), ("competition", "w_competition"), ("price_fit", "w_price"),
+               ("margin", "w_margin"), ("rating_gap", "w_rating"), ("size", "w_size")]
+
+
+def opportunity_score(product, eco, settings=None):
     """0-100 score with the parts that make it up, so the number is explainable."""
     price = num(product.get("price"))
     sales = num(product.get("monthly_sales"))
@@ -196,15 +227,97 @@ def opportunity_score(product, eco):
     size = _ramp(weight, 5, 1) if weight else 0.5
     margin = _ramp(eco["margin_pct"], 5, 30)
 
-    parts = {
-        "price_fit": round(price_fit * 15, 1),
-        "demand": round(demand * 25, 1),
-        "competition": round(competition * 25, 1),
-        "rating_gap": round(rating_gap * 10, 1),
-        "size": round(size * 10, 1),
-        "margin": round(margin * 15, 1),
-    }
-    return {"score": round(sum(parts.values())), "parts": parts}
+    raw = {"price_fit": price_fit, "demand": demand, "competition": competition,
+           "rating_gap": rating_gap, "size": size, "margin": margin}
+    settings = settings or DEFAULT_SETTINGS
+    weights = {name: max(num(settings.get(key), num(DEFAULT_SETTINGS[key])), 0) for name, key in SCORE_PARTS}
+    total = sum(weights.values()) or 1
+    weights = {name: w / total * 100 for name, w in weights.items()}
+    parts = {name: round(raw[name] * weights[name], 1) for name in raw}
+    return {"score": round(sum(raw[name] * weights[name] for name in raw)), "parts": parts,
+            "weights": {name: round(w, 1) for name, w in weights.items()}}
+
+
+# ------------------------------------------------------------- keywords
+
+def keyword_priority(search_volume, competing_products):
+    """0-100: high search volume and few competing products rank first."""
+    volume = _ramp(math.log10(max(num(search_volume), 1)), 2, math.log10(50000))
+    competing = num(competing_products)
+    ease = _ramp(math.log10(max(competing, 1)), 5, 2) if competing else 0.5
+    return round(volume * 60 + ease * 40)
+
+
+# -------------------------------------------------------- review analysis
+
+COMPLAINT_THEMES = {
+    "Broke or stopped working": ["broke", "broken", "breaks", "snapped", "cracked", "stopped working", "fell apart", "tore", "ripped", "split"],
+    "Cheap or flimsy feel": ["flimsy", "cheap", "thin", "poor quality", "low quality", "cheaply", "feels cheap", "not sturdy", "wobbly"],
+    "Wrong size or fit": ["too small", "too big", "too large", "smaller than", "bigger than", "doesn't fit", "does not fit", "didn't fit", "not fit", "too short", "too long", "too tight", "too loose", "runs small", "runs large"],
+    "Smell": ["smell", "smells", "odor", "stinks", "chemical"],
+    "Does not stay in place": ["slides", "slips", "won't stay", "doesn't stay", "does not stay", "falls off", "fell off", "came off", "doesn't stick", "won't stick"],
+    "Hard to clean": ["hard to clean", "difficult to clean", "stains", "stained", "mold", "mildew", "rust", "rusted"],
+    "Hard to use or assemble": ["hard to", "difficult to", "confusing", "instructions", "assemble", "assembly", "complicated"],
+    "Missing or wrong item": ["missing", "wrong item", "not as described", "not as pictured", "different from", "incomplete"],
+    "Arrived damaged": ["arrived damaged", "damaged", "dented", "scratched", "bent", "crushed"],
+    "Leaks": ["leak", "leaks", "leaked", "leaking", "spills"],
+    "Does not last": ["after a week", "after a month", "few weeks", "few days", "couple of weeks", "didn't last", "does not last", "wore out", "worn out"],
+    "Not worth the price": ["overpriced", "not worth", "waste of money", "too expensive", "pricey"],
+    "Noise": ["noisy", "loud", "squeak", "squeaks", "rattles"],
+}
+_STOP = set("""a about after again all also am an and any are as at be because been before being but by can could did do
+does doing don down each few for from get got had has have having he her here hers him his how i if in into is it its
+just like me more most my no nor not now of off on once one only or other our out over own really same she so some
+such than that the their them then there these they this those through to too under until up use used very was we
+were what when where which while who will with would you your product item bought buy amazon ordered order got just
+t s d ve ll re m""".split())
+
+
+def split_reviews(text):
+    """One review per line; blank lines also separate reviews pasted as paragraphs."""
+    blocks = re.split(r"\n\s*\n", text or "")
+    if len(blocks) < 3:
+        blocks = (text or "").splitlines()
+    return [" ".join(b.split()) for b in blocks if len(b.split()) >= 3]
+
+
+def analyze_reviews(text):
+    """Count complaint themes and repeated phrases in pasted reviews.
+
+    A keyword count, not a reading of the reviews: use it to decide what to
+    look at more closely.
+    """
+    reviews = split_reviews(text)
+    themes = []
+    for theme, phrases in COMPLAINT_THEMES.items():
+        hits, examples = 0, []
+        for review in reviews:
+            lower = review.lower()
+            found = next((p for p in phrases if re.search(r"(?<![a-z])" + re.escape(p) + r"(?![a-z])", lower)), None)
+            if found:
+                hits += 1
+                if len(examples) < 3:
+                    at = lower.index(found)
+                    start, end = max(0, at - 60), min(len(review), at + len(found) + 80)
+                    examples.append(("…" if start else "") + review[start:end].strip() + ("…" if end < len(review) else ""))
+        if hits:
+            themes.append({"theme": theme, "count": hits,
+                           "share_pct": round(hits / len(reviews) * 100), "examples": examples})
+    themes.sort(key=lambda t: t["count"], reverse=True)
+
+    counts = {}
+    for review in reviews:
+        words = [w for w in re.findall(r"[a-z']+", review.lower())]
+        seen = set()
+        for a, b in zip(words, words[1:]):
+            if a in _STOP or b in _STOP or len(a) < 3 or len(b) < 3:
+                continue
+            seen.add(f"{a} {b}")
+        for phrase in seen:
+            counts[phrase] = counts.get(phrase, 0) + 1
+    phrases = sorted(((c, p) for p, c in counts.items() if c >= 2), reverse=True)[:15]
+    return {"review_count": len(reviews), "themes": themes,
+            "phrases": [{"phrase": p, "count": c} for c, p in phrases]}
 
 
 # --------------------------------------------------------- listing checks
@@ -394,6 +507,24 @@ SALES_ALIASES = {
     "revenue": ["revenue", "sales", "ordered product sales", "product sales", "gross sales"],
     "ad_spend": ["ad spend", "ad_spend", "spend", "ads", "ppc"],
     "refunds": ["refunds", "refund", "refund amount", "returns"],
+    "sales_tax": ["sales tax", "tax", "tax collected", "marketplace facilitator tax"],
+}
+
+KEYWORD_ALIASES = {
+    "keyword": ["keyword", "keyword phrase", "phrase", "search term", "keywords"],
+    "search_volume": ["search volume", "volume", "monthly search volume", "exact search volume"],
+    "competing_products": ["competing products", "competitors", "competing", "number of competing products"],
+}
+
+ADS_ALIASES = {
+    "date": ["date", "start date", "day"],
+    "campaign": ["campaign", "campaign name"],
+    "keyword": ["keyword", "targeting", "customer search term", "search term"],
+    "impressions": ["impressions"],
+    "clicks": ["clicks"],
+    "spend": ["spend", "cost", "ad spend"],
+    "sales": ["sales", "7 day total sales", "14 day total sales", "7 day total sales ($)", "14 day total sales ($)", "total sales"],
+    "orders": ["orders", "7 day total orders (#)", "14 day total orders (#)", "total orders", "purchases"],
 }
 
 

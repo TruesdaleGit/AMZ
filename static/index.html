@@ -10,11 +10,22 @@
 <div class="shell">
   <nav class="side" aria-label="Sections">
     <div class="brand">Seller Toolkit</div>
-    <button data-view="find"><span class="step">1</span>Find products</button>
-    <button data-view="source"><span class="step">2</span>Source vendors</button>
-    <button data-view="list"><span class="step">3</span>Amazon listings</button>
-    <button data-view="site"><span class="step">4</span>Website</button>
-    <button data-view="profit"><span class="step">5</span>Profit</button>
+    <div class="group">Research</div>
+    <button data-view="find">Find products</button>
+    <button data-view="keywords">Keywords</button>
+    <button data-view="competitors">Competitors</button>
+    <button data-view="reviews">Review analysis</button>
+    <div class="group">Sourcing</div>
+    <button data-view="source">Source vendors</button>
+    <button data-view="orders">Purchase orders</button>
+    <div class="group">Launch</div>
+    <button data-view="list">Amazon listings</button>
+    <button data-view="site">Website</button>
+    <button data-view="checklist">Launch checklist</button>
+    <div class="group">Money</div>
+    <button data-view="profit">Profit</button>
+    <button data-view="ads">Ad campaigns</button>
+    <button data-view="cashflow">Cash flow</button>
     <button data-view="settings" class="settings">Settings</button>
   </nav>
   <main id="main"></main>
@@ -24,5 +35,6 @@
 <div id="tip" class="tip" hidden></div>
 <input type="file" id="file" accept=".csv,.tsv,.txt,text/csv" hidden>
 <script src="/static/app.js"></script>
+<script src="/static/views2.js"></script>
 </body>
 </html>
