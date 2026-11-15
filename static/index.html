@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Seller Toolkit</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="shell">
+  <nav class="side" aria-label="Sections">
+    <div class="brand">Seller Toolkit</div>
+    <button data-view="find"><span class="step">1</span>Find products</button>
+    <button data-view="source"><span class="step">2</span>Source vendors</button>
+    <button data-view="list"><span class="step">3</span>Amazon listings</button>
+    <button data-view="site"><span class="step">4</span>Website</button>
+    <button data-view="profit"><span class="step">5</span>Profit</button>
+    <button data-view="settings" class="settings">Settings</button>
+  </nav>
+  <main id="main"></main>
+</div>
+<dialog id="dlg"></dialog>
+<div id="toast" role="status" aria-live="polite"></div>
+<div id="tip" class="tip" hidden></div>
+<input type="file" id="file" accept=".csv,.tsv,.txt,text/csv" hidden>
+<script src="/static/app.js"></script>
+</body>
+</html>

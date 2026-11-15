@@ -1,0 +1,5 @@
+data.db
+storefront_build/
+__pycache__/
+.installed_version
+*.new
