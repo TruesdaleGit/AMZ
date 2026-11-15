@@ -12,6 +12,7 @@ import json
 import math
 import mimetypes
 import os
+import re
 import secrets
 import sys
 import threading
@@ -67,6 +68,10 @@ def build_state(conn, days=30):
         product["score"] = logic.opportunity_score(product, eco, settings)
         product["min_price"] = logic.min_price_for_margin(product, quote, settings)
         product["scenarios"] = logic.price_scenarios(product, quote, settings)
+        asin = (product["asin"] or "").strip().upper()
+        product["link"] = product["ref_url"] or (f"https://www.amazon.com/dp/{asin}" if re.fullmatch(r"[A-Z0-9]{10}", asin) else "")
+        product["alibaba_url"] = logic.alibaba_search_url(product)
+        product["listed_cost"] = logic.listed_cost(product, settings)
         product["potential"] = logic.profit_potential(product, eco, quote, settings)
         product["filter_reasons"] = [] if product["status"] == "dropped" else logic.filter_matches(product, settings)
         product["quote_count"] = len(quotes_by_product.get(product["id"], []))
@@ -402,7 +407,9 @@ def import_products(conn, text):
     parsed, fields = logic.parse_csv(text, logic.PRODUCT_ALIASES)
     if "name" not in fields:
         raise ApiError("No product name column found. Expected a header such as Name, Title or Product Name.")
-    seen_names = {r["name"].strip().lower() for r in db.rows(conn, "SELECT name FROM products")}
+    seen_names = set()
+    for r in db.rows(conn, "SELECT name, description FROM products"):
+        seen_names.update({r["name"].strip().lower(), r["description"].strip().lower()} - {""})
     seen_asins = {r["asin"].strip().lower() for r in db.rows(conn, "SELECT asin FROM products WHERE asin != ''")}
     added = skipped = duplicates = 0
     for row in parsed:
@@ -412,8 +419,11 @@ def import_products(conn, text):
         elif name in seen_names or (asin and asin in seen_asins):
             duplicates += 1
         else:
+            full = " ".join(row["name"].split())
+            row["name"] = logic.short_title(full, row.get("brand"))
+            row["description"] = full if full != row["name"] else ""
             create_row(conn, "products", row)
-            seen_names.add(name)
+            seen_names.update({name, row["name"].lower()})
             if asin:
                 seen_asins.add(asin)
             added += 1
@@ -603,8 +613,10 @@ def import_sales(conn, text):
     if missing:
         raise ApiError("Missing column(s): " + ", ".join(missing) + ". Needed: date, product, units, revenue.")
     lookup = {}
-    for product in db.rows(conn, "SELECT id, name, asin FROM products"):
+    for product in db.rows(conn, "SELECT id, name, asin, description FROM products"):
         lookup[product["name"].strip().lower()] = product["id"]
+        if product["description"]:
+            lookup[product["description"].strip().lower()] = product["id"]
         if product["asin"]:
             lookup[product["asin"].strip().lower()] = product["id"]
     added, unmatched = 0, []

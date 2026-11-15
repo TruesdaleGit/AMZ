@@ -140,6 +140,34 @@ class Additions(unittest.TestCase):
         self.assertEqual([r["group"] for r in logic.filter_matches({"name": "Beach Towel"}, custom)], ["Seasonal"])
         self.assertEqual(logic.filter_matches({"name": "Halloween Mask"}, custom), [])
 
+    def test_short_title(self):
+        short = logic.short_title
+        self.assertEqual(short("Dog Lick Mat with Suction Cups for Dogs & Cats, Slow Feeder Mat for Anxiety Relief (2 Pack, Blue)"),
+                         "Dog Lick Mat with Suction Cups")
+        self.assertEqual(short("PawCalm Dog Lick Mat - Slow Feeder for Anxiety | 2 Pack", brand="PawCalm"), "Dog Lick Mat")
+        self.assertEqual(short("Under Sink Organizer"), "Under Sink Organizer")                 # already short
+        self.assertEqual(short("ACME, Stainless Steel Pour Over Coffee Stand, Adjustable"), "ACME Stainless Steel Pour Over Coffee Stand")  # one-word lead is kept, so one more word
+        self.assertEqual(short("Resistance Bands for Working Out with Handles and Door Anchor for Men and Women Home Gym"),
+                         "Resistance Bands for Working Out")
+        self.assertLessEqual(len(short("Extraordinarily Supercalifragilistic Hyperdimensional Multifunctional Organizer Thing Extra Words")), 60)
+        self.assertEqual(short(""), "")
+
+    def test_alibaba_price_feeds_profit(self):
+        product = {"name": "Dog Lick Mat", "price": 25, "weight_lb": 0.6, "length_in": 9, "width_in": 9, "height_in": 1,
+                   "cost_low": 2, "cost_high": 4}
+        listed = logic.listed_cost(product, SETTINGS)
+        # midpoint 3.00 + 10% duty 0.30 + freight 0.6 lb x $2 = 1.20
+        self.assertEqual((listed["unit_cost"], listed["landed_cost"]), (3.0, 4.5))
+        eco = logic.unit_economics(product, None, SETTINGS)
+        self.assertEqual((eco["cost_source"], eco["landed_cost"]), ("alibaba", 4.5))
+        self.assertEqual(eco["profit"], round(25 - 3.75 - 4.15 - 4.5 - 0.75, 2))
+        quoted = logic.unit_economics(product, {"unit_cost": 5}, SETTINGS)
+        self.assertEqual((quoted["cost_source"], quoted["landed_cost"]), ("quote", 5))   # a real quote wins
+        self.assertEqual(logic.unit_economics({**product, "cost_low": None, "cost_high": None}, None, SETTINGS)["cost_source"], "assumed")
+        self.assertEqual(logic.listed_cost({"cost_low": 3, "cost_high": None}, SETTINGS)["landed_cost"], 4.3)  # one price, flat freight
+        self.assertEqual(logic.alibaba_search_url(product), "https://www.alibaba.com/trade/search?SearchText=Dog+Lick+Mat")
+        self.assertIsNotNone(logic.min_price_for_margin(product, None, SETTINGS))
+
     def test_keyword_priority_order(self):
         self.assertGreater(logic.keyword_priority(12000, 300), logic.keyword_priority(12000, 30000))
         self.assertGreater(logic.keyword_priority(12000, 300), logic.keyword_priority(300, 300))

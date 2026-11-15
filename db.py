@@ -5,7 +5,7 @@ import os
 import shutil
 import sqlite3
 
-from logic import DEFAULT_SETTINGS
+from logic import DEFAULT_SETTINGS, SHORT_TITLE_MAX, short_title
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("SELLER_TOOLKIT_DB") or os.path.join(APP_DIR, "data.db")
@@ -16,11 +16,13 @@ BACKUPS_TO_KEEP = 20
 # New columns listed here are added to existing databases on start-up.
 TABLES = {
     "products": [
-        ("name", "TEXT NOT NULL"), ("asin", "TEXT DEFAULT ''"), ("category", "TEXT DEFAULT ''"),
+        ("name", "TEXT NOT NULL"), ("description", "TEXT DEFAULT ''"), ("asin", "TEXT DEFAULT ''"),
+        ("ref_url", "TEXT DEFAULT ''"), ("thumb_url", "TEXT DEFAULT ''"), ("category", "TEXT DEFAULT ''"),
         ("price", "REAL DEFAULT 0"), ("monthly_sales", "REAL DEFAULT 0"), ("reviews", "REAL DEFAULT 0"),
         ("rating", "REAL DEFAULT 0"), ("weight_lb", "REAL DEFAULT 0"), ("length_in", "REAL DEFAULT 0"),
         ("width_in", "REAL DEFAULT 0"), ("height_in", "REAL DEFAULT 0"), ("referral_pct", "REAL"),
-        ("fba_fee_override", "REAL"), ("status", "TEXT DEFAULT 'idea'"), ("stock_on_hand", "REAL DEFAULT 0"),
+        ("fba_fee_override", "REAL"), ("cost_low", "REAL"), ("cost_high", "REAL"), ("cost_moq", "REAL DEFAULT 0"),
+        ("status", "TEXT DEFAULT 'idea'"), ("stock_on_hand", "REAL DEFAULT 0"),
         ("image_url", "TEXT DEFAULT ''"), ("images", "TEXT DEFAULT ''"), ("amazon_url", "TEXT DEFAULT ''"),
         ("checkout_url", "TEXT DEFAULT ''"), ("on_site", "INTEGER DEFAULT 0"), ("notes", "TEXT DEFAULT ''"),
     ],
@@ -104,7 +106,7 @@ SERVER_OWNED = {"stock_added", "saved_at", "data"}
 WRITABLE = {table: [c for c, _ in cols if c not in SERVER_OWNED]
             for table, cols in TABLES.items() if table != "listing_versions"}
 # Blank means "use the default", so these are stored as NULL rather than 0.
-NULLABLE_NUMBERS = {"referral_pct", "fba_fee_override", "supplier_id"}
+NULLABLE_NUMBERS = {"referral_pct", "fba_fee_override", "supplier_id", "cost_low", "cost_high"}
 FLAGS = {"chosen", "on_site", "done"}
 TEXT_COLUMNS = {c for cols in TABLES.values() for c, kind in cols if kind.startswith("TEXT")}
 REQUIRED = {"products": "name", "suppliers": "name", "keywords": "keyword", "competitors": "name",
@@ -146,6 +148,13 @@ def init():
     conn.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
     for key, value in DEFAULT_SETTINGS.items():
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, value))
+    # One-time upgrade: long imported titles become a short name plus a description.
+    if not conn.execute("SELECT 1 FROM settings WHERE key = 'titles_shortened'").fetchone():
+        for row in conn.execute("SELECT id, name FROM products WHERE description = '' AND length(name) > ?",
+                                (SHORT_TITLE_MAX,)).fetchall():
+            conn.execute("UPDATE products SET name = ?, description = ? WHERE id = ?",
+                         (short_title(row["name"]), row["name"], row["id"]))
+        conn.execute("INSERT INTO settings (key, value) VALUES ('titles_shortened', '1')")
     conn.commit()
     conn.close()
 

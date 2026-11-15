@@ -28,7 +28,7 @@ and `sample_data/sales.csv` under **Profit**.
 
 | Group | Section | What it does |
 |---|---|---|
-| Research | Find products | Add ideas or import a CSV. Each is scored 0-100; filter, sort and compare them side by side. **Auto-filter** removes seasonal and gated products. Score weights are in Settings. |
+| Research | Find products | Add ideas or import a CSV. Each is scored 0-100; filter, sort and compare them side by side. **Auto-filter** removes seasonal and gated products. Long imported titles are shortened, with the full title kept as a description, a thumbnail and a link to the Amazon page. Each row has a one-click Alibaba search and boxes for the price range you find, which becomes the product's cost in every profit figure. Score weights are in Settings. |
 | Research | Profit ranking | Ranks every idea by estimated monthly profit, with a Proceed, Investigate or Skip verdict, the investment needed, payback time and things to check. |
 | Research | Keywords | Keep keywords with search volume and competition, ranked by priority, and send the top ones to the listing. |
 | Research | Competitors | Log competing listings' price, reviews and rating over time. |
@@ -50,6 +50,8 @@ folder each time the app starts (the newest 20 copies are kept).
 - **No live Amazon data.** Sales, review and price figures come from you or from a CSV
   exported from a research tool. The importer recognises common column names
   (Name/Title, Price, Monthly Sales, Reviews/Review Count, Rating, Weight) and ignores the rest.
+- **No automatic Alibaba lookup.** Alibaba has no public search API and blocks automated
+  requests, so the app opens the search for you and you type in the price range you see.
 - **No direct upload to Amazon.** The listing export uses Amazon's common attribute
   names; copy the columns into the category template you download from Seller Central.
   Pushing listings automatically needs Selling Partner API access on your seller account.

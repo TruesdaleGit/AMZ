@@ -188,7 +188,7 @@ views.ranking = () => {
   const rows = list.map((p) => {
     const x = p.potential;
     return `<tr class="click" data-edit="products:${p.id}"><td class="num">${x.rank}</td>
-      <td class="wrap"><strong>${esc(p.name)}</strong><div class="muted small">${esc(x.why)}</div></td>
+      <td class="wrap">${productCell(p, x.why)}</td>
       <td><span class="pill ${pill[x.verdict]}">${x.verdict}</span></td>
       <td class="num">${int(x.est_units)}<div class="muted small">${x.share_pct}% of ${int(p.monthly_sales)}</div></td>
       <td class="num ${x.unit_profit_after_ads < 0 ? "neg" : ""}">${money(x.unit_profit_after_ads)}<div class="muted small">${pct(x.margin_after_ads_pct)}</div></td>

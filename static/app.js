@@ -33,6 +33,21 @@ const needProduct = (title) => `<h1>${title}</h1><div class="card empty">Add a p
 const productBar = (extra = "") => `<div class="bar"><label style="margin:0">Product</label>
   <select data-ui="product" style="width:auto;max-width:340px">${options(S.products, current().id)}</select><span class="grow"></span>${extra}</div>`;
 
+// Thumbnail, short title, Amazon link and description for a product row.
+function productCell(p, note = "") {
+  const asin = /^[A-Z0-9]{10}$/.test((p.asin || "").trim().toUpperCase()) ? p.asin.trim().toUpperCase() : "";
+  const src = /^(https?:\/\/|\/uploads\/)/.test(p.thumb_url || "") ? p.thumb_url : asin ? `https://images-na.ssl-images-amazon.com/images/P/${asin}.01._SL160_.jpg` : "";
+  const link = /^https?:\/\//.test(p.link || "") ? `<a class="small" href="${esc(p.link)}" target="_blank" rel="noopener noreferrer">View on Amazon ↗</a>` : "";
+  return `<div class="pcell"><span class="pthumb">${src ? `<img src="${esc(src)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : ""}</span>
+    <div><strong>${esc(p.name)}</strong>
+      <div class="muted small">${[esc(p.category), link].filter(Boolean).join(" · ")}</div>
+      ${note ? `<div class="muted small">${esc(note)}</div>` : ""}
+      ${p.description ? `<div class="pdesc" title="${esc(p.description)}">${esc(p.description)}</div>` : ""}</div></div>`;
+}
+// A thumbnail that fails to load, or comes back as a blank placeholder, is removed.
+main.addEventListener("error", (e) => { if (e.target.closest && e.target.closest(".pthumb")) e.target.remove(); }, true);
+main.addEventListener("load", (e) => { if (e.target.closest && e.target.closest(".pthumb") && e.target.naturalWidth < 5) e.target.remove(); }, true);
+
 function toast(message, isError) {
   const el = document.getElementById("toast");
   el.textContent = message;
@@ -184,8 +199,11 @@ const FORMS = {
     title: (r) => (r ? r.name : "Add product idea"), defaults: () => ({ status: "idea" }),
     extra: (r) => (r ? ecoBlock(r) : ""),
     fields: () => [
-      { name: "name", label: "Product name", required: true, full: true },
+      { name: "name", label: "Short title", required: true, full: true },
+      { name: "description", label: "Description: full Amazon title and other details", type: "textarea", full: true },
       { name: "asin", label: "ASIN (of a reference listing, optional)" },
+      { name: "ref_url", label: "Amazon page link (blank = built from the ASIN)" },
+      { name: "thumb_url", label: "Thumbnail picture", type: "image", full: true },
       { name: "category", label: "Category" },
       { name: "price", label: "Selling price ($)", type: "number" },
       { name: "monthly_sales", label: "Est. monthly sales of top sellers (units)", type: "number" },
@@ -197,6 +215,9 @@ const FORMS = {
       { name: "height_in", label: "Height (in)", type: "number" },
       { name: "referral_pct", label: "Referral fee % (blank = default)", type: "number" },
       { name: "fba_fee_override", label: "FBA fee per unit $ (blank = estimate)", type: "number" },
+      { name: "cost_low", label: "Alibaba price, low end ($ per unit)", type: "number" },
+      { name: "cost_high", label: "Alibaba price, high end ($ per unit)", type: "number" },
+      { name: "cost_moq", label: "Alibaba minimum order (units)", type: "number" },
       { name: "status", label: "Status", type: "select", options: STATUSES },
       { name: "stock_on_hand", label: "Stock on hand (units)", type: "number" },
       { name: "notes", label: "Notes", type: "textarea", full: true },
@@ -261,6 +282,17 @@ function openTable(table, row) {
     row ? () => run(() => api("DELETE", `${table}/${row.id}`), "Deleted") : null);
 }
 
+const COST_SOURCE = { quote: "from supplier quote", alibaba: "Alibaba price + duty and freight", assumed: "assumed" };
+
+// Alibaba search link plus the price range seen there; saved as typed.
+function costCell(p) {
+  const link = p.alibaba_url ? `<a class="small" href="${esc(p.alibaba_url)}" target="_blank" rel="noopener noreferrer">Search Alibaba ↗</a>` : "";
+  if (p.eco.cost_source === "quote") return `<strong>${money(p.eco.landed_cost)}</strong><div class="muted small">supplier quote</div>`;
+  const field = (name, hint) => `<input type="number" step="any" min="0" class="mini" data-set="products:${p.id}:${name}" value="${p[name] ?? ""}" placeholder="${hint}" aria-label="Alibaba price ${hint}">`;
+  return `<div class="costpair">${field("cost_low", "low")}<span class="muted">–</span>${field("cost_high", "high")}</div>
+    <div class="small">${link}${p.listed_cost ? ` <span class="muted">· landed ${money(p.listed_cost.landed_cost)}</span>` : ""}</div>`;
+}
+
 function ecoBlock(p) {
   const e = p.eco, parts = p.score.parts, w = p.score.weights;
   const row = (k, v, cls = "") => `<dt class="${cls}">${k}</dt><dd class="${cls}">${v}</dd>`;
@@ -270,7 +302,7 @@ function ecoBlock(p) {
       ${row("Price", money(e.price))}
       ${row(`Referral fee (${e.referral_pct}%)`, "-" + money(e.referral_fee))}
       ${row(`FBA fee (${e.fba_source === "override" ? "your figure" : "estimate, " + e.size_tier})`, "-" + money(e.fba_fee))}
-      ${row(`Landed cost (${e.cost_source === "quote" ? "from quote" : "assumed"})`, "-" + money(e.landed_cost))}
+      ${row(`Landed cost (${COST_SOURCE[e.cost_source]})`, "-" + money(e.landed_cost))}
       ${row("Returns allowance", "-" + money(e.returns_allowance))}
       ${row("Net profit", money(e.profit), "total")}
       ${row("Margin / ROI", pct(e.margin_pct) + " / " + pct(e.roi_pct))}
@@ -286,7 +318,7 @@ const views = {};
 
 const FIND_COLS = [
   ["name", "Product", (p) => p.name.toLowerCase()], ["price", "Price", (p) => p.price], ["sales", "Sales / mo", (p) => p.monthly_sales],
-  ["reviews", "Reviews", (p) => p.reviews], ["rating", "Rating", (p) => p.rating], ["profit", "Profit / unit", (p) => p.eco.profit],
+  ["reviews", "Reviews", (p) => p.reviews], ["rating", "Rating", (p) => p.rating], ["cost", "Cost on Alibaba ($)", (p) => p.eco.landed_cost], ["profit", "Profit / unit", (p) => p.eco.profit],
   ["margin", "Margin", (p) => p.eco.margin_pct], ["score", "Score", (p) => p.score.score],
 ];
 
@@ -294,21 +326,21 @@ function findTable() {
   const f = ui.find, q = f.q.trim().toLowerCase();
   const key = FIND_COLS.find((c) => c[0] === f.sort)[2];
   const list = S.products
-    .filter((p) => (!q || (p.name + " " + p.category + " " + p.asin).toLowerCase().includes(q)) && (f.status === "all" || (f.status ? p.status === f.status : p.status !== "dropped")) && p.score.score >= f.min)
+    .filter((p) => (!q || (p.name + " " + p.description + " " + p.category + " " + p.asin).toLowerCase().includes(q)) && (f.status === "all" || (f.status ? p.status === f.status : p.status !== "dropped")) && p.score.score >= f.min)
     .sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0) * f.dir);
   if (!S.products.length) return '<div class="empty">No product ideas yet. Add one, or import a CSV with columns such as Name, Price, Monthly Sales, Reviews, Rating and Weight.</div>';
   if (!list.length) return '<div class="empty">No products match these filters.</div>';
   const head = FIND_COLS.map(([k, label], i) => `<th class="${i ? "num" : ""}"><button class="sort" data-sort="${k}">${label}${f.sort === k ? (f.dir < 0 ? " ↓" : " ↑") : ""}</button></th>`).join("");
   const rows = list.map((p) => `<tr class="click" data-edit="products:${p.id}">
       <td><input type="checkbox" data-compare="${p.id}" ${ui.compare.has(p.id) ? "checked" : ""} aria-label="Compare ${esc(p.name)}"></td>
-      <td class="wrap"><strong>${esc(p.name)}</strong>${p.category ? `<div class="muted small">${esc(p.category)}</div>` : ""}</td>
+      <td class="wrap">${productCell(p)}</td>
       <td class="num">${money(p.price)}</td><td class="num">${int(p.monthly_sales)}</td>
-      <td class="num">${int(p.reviews)}</td><td class="num">${p.rating ? p.rating.toFixed(1) : "–"}</td>
-      <td class="num ${p.eco.profit < 0 ? "neg" : ""}">${money(p.eco.profit)}${p.eco.cost_source === "assumed" ? '<span class="muted" title="Uses an assumed landed cost until you add a supplier quote">*</span>' : ""}</td>
+      <td class="num">${int(p.reviews)}</td><td class="num">${p.rating ? p.rating.toFixed(1) : "–"}</td><td class="num">${costCell(p)}</td>
+      <td class="num ${p.eco.profit < 0 ? "neg" : ""}">${money(p.eco.profit)}${p.eco.cost_source === "assumed" ? '<span class="muted" title="Uses an assumed landed cost until you enter an Alibaba price or a supplier quote">*</span>' : ""}</td>
       <td class="num">${pct(p.eco.margin_pct)}</td><td>${meter(p.score.score)}</td>
       <td><select data-set="products:${p.id}:status" aria-label="Status">${options(STATUSES, p.status)}</select></td></tr>`).join("");
   return `<table><thead><tr><th></th>${head}<th>Status</th></tr></thead><tbody>${rows}</tbody></table>
-    <p class="muted small">${list.length} of ${S.products.length} shown. * profit uses an assumed landed cost of ${esc(S.settings.assumed_cost_pct)}% of price until a quote exists.</p>`;
+    <p class="muted small">${list.length} of ${S.products.length} shown. * profit uses an assumed landed cost of ${esc(S.settings.assumed_cost_pct)}% of price until you enter an Alibaba price or a supplier quote. An Alibaba price has ${esc(S.settings.est_duty_pct)}% duty and freight of $${esc(S.settings.est_freight_per_lb)} per lb added to give the landed cost.</p>`;
 }
 
 views.find = () => {
@@ -319,6 +351,7 @@ views.find = () => {
       <button class="btn" data-act="import-products">Import CSV</button>
       <button class="btn" data-act="compare">Compare selected</button>
       <button class="btn" data-act="auto-filter">Auto-filter</button>
+      <button class="btn" data-act="cost-helper">Look up costs on Alibaba</button>
       <button class="btn" data-act="go-ranking">Rank by profit potential</button><span class="grow"></span>${xl("products")}</div>
     <div class="bar filters"><input type="text" data-find="q" value="${esc(f.q)}" placeholder="Search name, category or ASIN" aria-label="Search">
       <select data-find="status" aria-label="Status filter"><option value="">Active (hides dropped)</option><option value="all" ${f.status === "all" ? "selected" : ""}>All, including dropped</option>${options(STATUSES, f.status)}</select>
@@ -346,6 +379,34 @@ function autoFilterDialog() {
     if (ids.length) run(() => api("POST", "products/drop", { ids }), (r) => `Removed ${plural(r.dropped, "product")}. Show them again with the status filter "All, including dropped".`);
   };
   dlg.showModal();
+}
+
+// Steps through the products that still have no real cost, one at a time.
+function costHelper(skipped = new Set()) {
+  const todo = S.products.filter((p) => p.status !== "dropped" && p.eco.cost_source === "assumed" && !skipped.has(p.id))
+    .sort((a, b) => b.score.score - a.score.score);
+  if (!todo.length) return openInfo("Look up costs on Alibaba", "<p>Every active product has an Alibaba price or a supplier quote.</p>");
+  const p = todo[0];
+  dlg.innerHTML = `<form method="dialog"><h2>Look up costs on Alibaba <span class="muted small">${todo.length} left</span></h2>
+    ${productCell(p)}
+    <p style="margin:14px 0 6px">1. Open the search, find listings that match this product, and note the price range for a quantity near your first order.</p>
+    <a class="btn" href="${esc(p.alibaba_url)}" target="_blank" rel="noopener noreferrer">Search Alibaba for "${esc(p.name)}" ↗</a>
+    <p class="muted small" style="margin:6px 0 14px">To match by picture instead, click the camera icon in Alibaba's search box and upload or paste the product photo.</p>
+    <p style="margin:0 0 6px">2. Enter what you found.</p>
+    <div class="fields three"><div><label>Low price ($ per unit)</label><input type="number" step="any" min="0" name="cost_low"></div>
+      <div><label>High price ($ per unit)</label><input type="number" step="any" min="0" name="cost_high"></div>
+      <div><label>Minimum order (units)</label><input type="number" min="0" name="cost_moq"></div></div>
+    <div class="actions"><button type="button" class="btn left" data-cancel>Close</button>
+      <button type="button" class="btn" data-skip>Skip</button><button class="btn primary">Save and next</button></div></form>`;
+  dlg.querySelector("[data-cancel]").onclick = () => dlg.close();
+  dlg.querySelector("[data-skip]").onclick = () => { skipped.add(p.id); costHelper(skipped); };
+  dlg.querySelector("form").onsubmit = async (event) => {
+    event.preventDefault();
+    const v = formValues(event.target);
+    if (!Number(v.cost_low) && !Number(v.cost_high)) return toast("Enter at least one price, or click Skip.", true);
+    try { await api("PUT", "products/" + p.id, v); await load(); costHelper(skipped); } catch (e) { toast(e.message, true); }
+  };
+  if (!dlg.open) dlg.showModal();
 }
 
 function compareDialog() {
@@ -564,6 +625,10 @@ const SETTING_GROUPS = [
     { name: "assumed_cost_pct", label: "Assumed landed cost before a quote (% of price)", type: "number" },
     { name: "safety_stock_days", label: "Safety stock (days)", type: "number" },
     { name: "reorder_cover_days", label: "Days of sales each reorder should cover", type: "number" }]],
+  ["Turning an Alibaba price into a landed cost", [
+    { name: "est_duty_pct", label: "Import duty (% of unit price)", type: "number" },
+    { name: "est_freight_per_lb", label: "Freight per lb ($)", type: "number" },
+    { name: "est_freight_flat", label: "Freight per unit when weight is unknown ($)", type: "number" }]],
   ["Score weights (relative; they are scaled to total 100)", [
     { name: "w_demand", label: "Demand", type: "number" }, { name: "w_competition", label: "Competition", type: "number" },
     { name: "w_price", label: "Price fit", type: "number" }, { name: "w_margin", label: "Margin", type: "number" },
@@ -587,7 +652,10 @@ views.settings = () => `<h1>Settings</h1>
 
 function render() {
   document.querySelectorAll(".side button").forEach((b) => b.classList.toggle("on", b.dataset.view === ui.view));
+  // Saving an inline field redraws the page; put the cursor back where it was.
+  const active = document.activeElement, focusKey = active && main.contains(active) ? active.dataset.set : null;
   main.innerHTML = views[ui.view]();
+  if (focusKey) { const again = main.querySelector(`[data-set="${focusKey}"]`); if (again) again.focus(); }
   updateCounts();
 }
 
@@ -610,6 +678,7 @@ const actions = {
     + (r.duplicates ? `, skipped ${plural(r.duplicates, "duplicate")}` : "") + (r.skipped ? `, skipped ${r.skipped} without a name` : "") + `. Columns read: ${r.columns_used.join(", ")}`)),
   "compare": compareDialog,
   "auto-filter": autoFilterDialog,
+  "cost-helper": () => costHelper(),
   "go-ranking": () => { ui.view = "ranking"; render(); window.scrollTo(0, 0); },
   "add-quote": () => (S.suppliers.length ? openTable("quotes") : toast("Add a supplier first.", true)),
   "outreach": async () => {

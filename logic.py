@@ -38,6 +38,10 @@ DEFAULT_SETTINGS = {
                     "gift card, dvd, blu-ray, video game, software, fine jewelry, collectible coin, "
                     "disney, marvel, pokemon, star wars, harry potter, lego, nintendo, barbie, hello kitty, nfl, nba, "
                     "mlb, nhl, nike, adidas",
+    # turning an Alibaba listing price into a landed cost
+    "est_duty_pct": "10",
+    "est_freight_per_lb": "2",
+    "est_freight_flat": "1",       # per unit, when the product has no weight
     # profit ranking assumptions
     "capture_share_pct": "30",     # share of a top seller's sales a new listing can reach
     "launch_ad_pct": "15",         # ad cost as % of price while ranking
@@ -135,6 +139,32 @@ def price_breaks(quote):
     return sorted(tiers, key=lambda t: t["quantity"])
 
 
+def listed_cost(product, settings):
+    """Landed cost estimated from the Alibaba price range entered on a product.
+
+    Uses the middle of the range, then adds duty and a freight estimate by
+    weight. A listing price is not a quote: real prices depend on quantity,
+    customisation and negotiation.
+    """
+    low, high = num(product.get("cost_low"), None), num(product.get("cost_high"), None)
+    prices = [p for p in (low, high) if p is not None and p > 0]
+    if not prices:
+        return None
+    unit = sum(prices) / len(prices)
+    duty = unit * num(settings.get("est_duty_pct"), 10) / 100
+    weight = num(product.get("weight_lb"))
+    freight = num(settings.get("est_freight_per_lb"), 2) * max(weight, 0.25) if weight else num(settings.get("est_freight_flat"), 1)
+    return {"unit_cost": round(unit, 2), "low": min(prices), "high": max(prices), "duty": round(duty, 2),
+            "freight": round(freight, 2), "landed_cost": round(unit + duty + freight, 2)}
+
+
+def alibaba_search_url(product):
+    """Link to an Alibaba search for this product's short title."""
+    from urllib.parse import quote_plus
+    query = re.sub(r"[^A-Za-z0-9 ]+", " ", product.get("name") or "").strip()
+    return "https://www.alibaba.com/trade/search?SearchText=" + quote_plus(" ".join(query.split())) if query else ""
+
+
 def pick_quote(quotes):
     """The quote marked chosen, otherwise the cheapest landed cost."""
     if not quotes:
@@ -163,7 +193,10 @@ def unit_economics(product, quote, settings, price=None):
 
     cost = landed_cost(quote)
     cost_source = "quote"
-    if cost is None:
+    listed = listed_cost(product, settings) if cost is None else None
+    if listed:
+        cost, cost_source = listed["landed_cost"], "alibaba"
+    elif cost is None:
         cost = round(price * num(settings.get("assumed_cost_pct"), 25) / 100, 2)
         cost_source = "assumed"
 
@@ -198,7 +231,7 @@ def min_price_for_margin(product, quote, settings, target_pct=None):
     cost = eco["landed_cost"]
     if eco["cost_source"] == "assumed":
         return None
-    return round((cost + eco["fba_fee"]) / share, 2)
+    return round((cost + eco["fba_fee"]) / share, 2)  # an Alibaba-based cost is good enough for a floor price
 
 
 def price_scenarios(product, quote, settings):
@@ -270,7 +303,7 @@ def _filter_terms(text):
 
 def filter_matches(product, settings):
     """Reasons to remove a product: whole-word matches of the filter lists in its name or category."""
-    text = f"{product.get('name') or ''} {product.get('category') or ''}".lower().replace("\u2019", "'")
+    text = f"{product.get('name') or ''} {product.get('description') or ''} {product.get('category') or ''}".lower().replace("\u2019", "'")
     reasons = []
     for key, label in FILTER_GROUPS:
         terms = _filter_terms(settings.get(key) if settings.get(key) is not None else DEFAULT_SETTINGS[key])
@@ -306,7 +339,10 @@ def profit_potential(product, eco, quote, settings):
     margin = round(unit_profit / price * 100, 1) if price else 0.0
     monthly_profit = round(units * unit_profit, 2)
 
-    base_order = num(quote.get("moq")) if quote and num(quote.get("moq")) else num(settings.get("default_first_order"), 500)
+    if quote and num(quote.get("moq")):
+        base_order = num(quote.get("moq"))
+    else:
+        base_order = num(product.get("cost_moq")) or num(settings.get("default_first_order"), 500)
     first_order = int(max(base_order, math.ceil(units * 2)))
     investment = round(first_order * eco["landed_cost"] + num(settings.get("launch_fixed_cost"), 1000), 2)
     payback = round(investment / monthly_profit, 1) if monthly_profit > 0 else None
@@ -321,7 +357,9 @@ def profit_potential(product, eco, quote, settings):
     if not known_size:
         blockers.append("No weight, so the FBA fee is missing and profit is overstated")
     if eco["cost_source"] == "assumed":
-        risks.append("Product cost is assumed; get a supplier quote")
+        risks.append("Product cost is assumed; look it up on Alibaba or get a quote")
+    elif eco["cost_source"] == "alibaba":
+        risks.append("Cost is an Alibaba listing price; confirm with a supplier quote")
     if not reviews:
         risks.append("No review count, so competition is unknown")
     elif reviews > 1500:
@@ -614,7 +652,10 @@ def draft_listing(brand, product_name, features, keywords):
 # ------------------------------------------------------------- CSV import
 
 PRODUCT_ALIASES = {
-    "name": ["name", "title", "product name", "product title", "product details", "product", "item name", "description"],
+    "name": ["name", "title", "product name", "product title", "product details", "product", "item name"],
+    "brand": ["brand", "brand name"],
+    "thumb_url": ["image url", "image", "image link", "main image", "image src", "picture", "picture url", "thumbnail"],
+    "ref_url": ["url", "product url", "amazon url", "listing url", "link", "product link"],
     "asin": ["asin"],
     "category": ["category", "main category", "product category"],
     "price": ["price", "price $", "price us$", "price (usd)", "avg price", "average price", "buy box price"],
@@ -683,6 +724,35 @@ def parse_csv(text, aliases):
     for row in rows[1:]:
         out.append({field: (row[i].strip() if i < len(row) else "") for field, i in mapping.items()})
     return out, sorted(mapping)
+
+
+_TITLE_BREAK = re.compile(r"\s[-\u2013\u2014|/]\s|[,;:(\[{|\u2013\u2014]")
+_TRAILING = {"with", "for", "and", "&", "of", "in", "the", "to", "by", "a", "an", "on", "+", "w/"}
+SHORT_TITLE_MAX = 45
+
+
+def short_title(title, brand=""):
+    """A short product name from a long Amazon title: the first phrase, at most six words."""
+    title = " ".join((title or "").split())
+    brand = " ".join((brand or "").split())
+    text = title
+    if brand and text.lower().startswith(brand.lower() + " ") and len(text.split()) > len(brand.split()) + 1:
+        text = text[len(brand):].strip()
+    if len(text) <= SHORT_TITLE_MAX and not _TITLE_BREAK.search(text):
+        return text
+    first = _TITLE_BREAK.split(text, 1)[0].strip()
+    if len(first.split()) < 2:   # the title opens with a one-word phrase, such as a brand; keep going
+        rest = _TITLE_BREAK.split(text, 2)
+        first = " ".join(part.strip() for part in rest[:2]).strip()
+        limit = 7
+    else:
+        limit = 6
+    words = first.split()[:limit]
+    while len(words) > 3 and len(" ".join(words)) > SHORT_TITLE_MAX:
+        words.pop()
+    while len(words) > 1 and words[-1].lower() in _TRAILING:
+        words.pop()
+    return " ".join(words).strip(" -,") or title[:SHORT_TITLE_MAX]
 
 
 def slugify(text):
