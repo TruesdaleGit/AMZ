@@ -28,7 +28,7 @@ and `sample_data/sales.csv` under **Profit**.
 
 | Group | Section | What it does |
 |---|---|---|
-| Research | Find products | Add ideas or import a CSV. Each is scored 0-100; filter, sort and compare them side by side. Score weights are in Settings. |
+| Research | Find products | Add ideas or import a CSV. Each is scored 0-100; filter, sort and compare them side by side. **Auto-filter** removes seasonal and gated products. Score weights are in Settings. |
 | Research | Profit ranking | Ranks every idea by estimated monthly profit, with a Proceed, Investigate or Skip verdict, the investment needed, payback time and things to check. |
 | Research | Keywords | Keep keywords with search volume and competition, ranked by priority, and send the top ones to the listing. |
 | Research | Competitors | Log competing listings' price, reviews and rating over time. |

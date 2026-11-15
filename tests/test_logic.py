@@ -127,6 +127,19 @@ class Additions(unittest.TestCase):
         self.assertIs(ranked[0], good)
         self.assertNotIn(dropped, ranked)
 
+    def test_auto_filter(self):
+        match = lambda name, category="": [r["group"] for r in logic.filter_matches({"name": name, "category": category}, SETTINGS)]
+        self.assertEqual(match("Halloween Costumes for Dogs"), ["Seasonal"])
+        self.assertEqual(match("Christmas Tree Ornaments Set"), ["Seasonal"])
+        self.assertEqual(match("Compatible Ink Cartridges for HP 61"), ["Gated or hard to source"])
+        self.assertEqual(match("Marvel Halloween Mask"), ["Seasonal", "Gated or hard to source"])
+        self.assertEqual(match("Dog Lick Mat with Suction Cups", "Pet Supplies"), [])
+        self.assertEqual(match("Winery Tour Guide Notebook"), [])      # "wine" only as a whole word
+        self.assertEqual(match("Begun Planner"), [])                   # "gun" only as a whole word
+        custom = {**SETTINGS, "filter_seasonal": "beach", "filter_gated": ""}
+        self.assertEqual([r["group"] for r in logic.filter_matches({"name": "Beach Towel"}, custom)], ["Seasonal"])
+        self.assertEqual(logic.filter_matches({"name": "Halloween Mask"}, custom), [])
+
     def test_keyword_priority_order(self):
         self.assertGreater(logic.keyword_priority(12000, 300), logic.keyword_priority(12000, 30000))
         self.assertGreater(logic.keyword_priority(12000, 300), logic.keyword_priority(300, 300))

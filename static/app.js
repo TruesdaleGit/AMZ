@@ -126,6 +126,19 @@ function openInfo(title, body) {
   dlg.showModal();
 }
 
+// Clicking the dimmed background closes the dialog. The press must also start
+// outside, so dragging a text selection out of a field does not close it.
+const outsideDialog = (event) => {
+  const r = dlg.getBoundingClientRect();
+  return event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom;
+};
+let pressedOutside = false;
+dlg.addEventListener("mousedown", (event) => { pressedOutside = event.target === dlg && outsideDialog(event); });
+dlg.addEventListener("click", (event) => {
+  if (pressedOutside && event.target === dlg && outsideDialog(event)) dlg.close();
+  pressedOutside = false;
+});
+
 dlg.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-upload]");
   if (!button) return;
@@ -281,7 +294,7 @@ function findTable() {
   const f = ui.find, q = f.q.trim().toLowerCase();
   const key = FIND_COLS.find((c) => c[0] === f.sort)[2];
   const list = S.products
-    .filter((p) => (!q || (p.name + " " + p.category + " " + p.asin).toLowerCase().includes(q)) && (!f.status || p.status === f.status) && p.score.score >= f.min)
+    .filter((p) => (!q || (p.name + " " + p.category + " " + p.asin).toLowerCase().includes(q)) && (f.status === "all" || (f.status ? p.status === f.status : p.status !== "dropped")) && p.score.score >= f.min)
     .sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0) * f.dir);
   if (!S.products.length) return '<div class="empty">No product ideas yet. Add one, or import a CSV with columns such as Name, Price, Monthly Sales, Reviews, Rating and Weight.</div>';
   if (!list.length) return '<div class="empty">No products match these filters.</div>';
@@ -305,12 +318,35 @@ views.find = () => {
     <div class="bar"><button class="btn primary" data-add="products">Add product idea</button>
       <button class="btn" data-act="import-products">Import CSV</button>
       <button class="btn" data-act="compare">Compare selected</button>
+      <button class="btn" data-act="auto-filter">Auto-filter</button>
       <button class="btn" data-act="go-ranking">Rank by profit potential</button><span class="grow"></span>${xl("products")}</div>
     <div class="bar filters"><input type="text" data-find="q" value="${esc(f.q)}" placeholder="Search name, category or ASIN" aria-label="Search">
-      <select data-find="status" aria-label="Status filter"><option value="">All statuses</option>${options(STATUSES, f.status)}</select>
+      <select data-find="status" aria-label="Status filter"><option value="">Active (hides dropped)</option><option value="all" ${f.status === "all" ? "selected" : ""}>All, including dropped</option>${options(STATUSES, f.status)}</select>
       <label style="margin:0">Min score</label><input type="number" data-find="min" value="${f.min}" min="0" max="100" style="width:80px" aria-label="Minimum score"></div>
     <div class="card scroll" id="find-table">${findTable()}</div>`;
 };
+
+// Lists products that look seasonal or gated and removes the ticked ones (status: dropped).
+function autoFilterDialog() {
+  const hits = S.products.filter((p) => p.filter_reasons.length);
+  if (!hits.length) return openInfo("Auto-filter", `<p>No active products match the seasonal or gated word lists.</p>
+    <p class="muted small">The lists are under Settings, where you can add or remove words.</p>`);
+  const rows = hits.map((p) => `<tr><td><input type="checkbox" value="${p.id}" checked aria-label="Remove ${esc(p.name)}"></td>
+    <td class="wrap"><strong>${esc(p.name)}</strong>${p.category ? `<div class="muted small">${esc(p.category)}</div>` : ""}</td>
+    <td class="wrap">${p.filter_reasons.map((r) => `<span class="pill warn">${esc(r.group)}</span> <span class="muted small">${r.terms.map(esc).join(", ")}</span>`).join("<br>")}</td></tr>`).join("");
+  dlg.innerHTML = `<h2>Auto-filter: ${plural(hits.length, "product")} to remove</h2>
+    <p class="muted" style="margin-top:-6px">These match the seasonal or gated word lists. Untick any you want to keep. Removed products are marked dropped, which hides them from this list and the profit ranking; you can bring one back by changing its status.</p>
+    <div class="scroll" style="max-height:50vh;overflow-y:auto"><table><thead><tr><th></th><th>Product</th><th>Why</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <p class="muted small">Matching is by words in the name and category, so check the list: it can catch a product that only mentions a word. Edit the word lists under Settings.</p>
+    <div class="actions"><button type="button" class="btn" data-cancel>Cancel</button><button type="button" class="btn primary" data-go>Remove ticked products</button></div>`;
+  dlg.querySelector("[data-cancel]").onclick = () => dlg.close();
+  dlg.querySelector("[data-go]").onclick = () => {
+    const ids = [...dlg.querySelectorAll("tbody input:checked")].map((el) => Number(el.value));
+    dlg.close();
+    if (ids.length) run(() => api("POST", "products/drop", { ids }), (r) => `Removed ${plural(r.dropped, "product")}. Show them again with the status filter "All, including dropped".`);
+  };
+  dlg.showModal();
+}
 
 function compareDialog() {
   const list = [...ui.compare].map(product).filter(Boolean).slice(0, 4);
@@ -536,6 +572,9 @@ const SETTING_GROUPS = [
     { name: "starting_cash", label: "Cash on hand today ($)", type: "number" },
     { name: "payout_delay_days", label: "Days between a sale and Amazon's payout", type: "number" },
     { name: "sales_growth_pct", label: "Expected sales growth per month (%)", type: "number" }]],
+  ["Auto-filter word lists (comma separated; matched as whole words in the product name and category)", [
+    { name: "filter_seasonal", label: "Seasonal", type: "textarea", rows: 5, full: true },
+    { name: "filter_gated", label: "Gated or hard to source", type: "textarea", rows: 6, full: true }]],
   ["You", [
     { name: "brand", label: "Brand name" }, { name: "your_name", label: "Your name (for supplier messages)" },
     { name: "company", label: "Company (for supplier messages)" }]],
@@ -570,6 +609,7 @@ const actions = {
   "import-products": () => pickCsv((csv) => run(() => api("POST", "import/products", { csv }), (r) => `Imported ${plural(r.added, "product")}`
     + (r.duplicates ? `, skipped ${plural(r.duplicates, "duplicate")}` : "") + (r.skipped ? `, skipped ${r.skipped} without a name` : "") + `. Columns read: ${r.columns_used.join(", ")}`)),
   "compare": compareDialog,
+  "auto-filter": autoFilterDialog,
   "go-ranking": () => { ui.view = "ranking"; render(); window.scrollTo(0, 0); },
   "add-quote": () => (S.suppliers.length ? openTable("quotes") : toast("Add a supplier first.", true)),
   "outreach": async () => {

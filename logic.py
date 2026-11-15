@@ -23,6 +23,21 @@ DEFAULT_SETTINGS = {
     "company": "",
     # opportunity score weights (any scale; they are normalised to 100)
     "w_demand": "25", "w_competition": "25", "w_price": "15", "w_margin": "15", "w_rating": "10", "w_size": "10",
+    # auto-filter word lists (comma separated, editable in Settings)
+    "filter_seasonal": "halloween, christmas, xmas, santa, advent calendar, easter, valentine, valentines, thanksgiving, "
+                       "fourth of july, 4th of july, independence day, hanukkah, menorah, new years, new year's, "
+                       "st patricks, st. patrick's, mardi gras, cinco de mayo, mother's day, mothers day, father's day, "
+                       "fathers day, costume, jack-o-lantern, jack o lantern, pumpkin carving, trick or treat, snowman, "
+                       "reindeer, nutcracker, ornament, stocking stuffer, christmas tree, wreath, tinsel, elf on, "
+                       "easter egg, easter basket, graduation, back to school, holiday decor, holiday decoration",
+    "filter_gated": "ink cartridge, toner cartridge, printer ink, toner, supplement, vitamin, probiotic, protein powder, "
+                    "dietary, cbd, hemp oil, medication, medicine, otc, pharmacy, medical device, contact lens, "
+                    "pesticide, insecticide, weed killer, rodenticide, alcohol, wine, beer, liquor, tobacco, vape, "
+                    "e-cigarette, nicotine, firearm, ammunition, ammo, gun, knife, taser, pepper spray, firework, "
+                    "lithium battery, aerosol, flammable, propane, baby formula, infant formula, car seat, "
+                    "gift card, dvd, blu-ray, video game, software, fine jewelry, collectible coin, "
+                    "disney, marvel, pokemon, star wars, harry potter, lego, nintendo, barbie, hello kitty, nfl, nba, "
+                    "mlb, nhl, nike, adidas",
     # profit ranking assumptions
     "capture_share_pct": "30",     # share of a top seller's sales a new listing can reach
     "launch_ad_pct": "15",         # ad cost as % of price while ranking
@@ -242,6 +257,27 @@ def opportunity_score(product, eco, settings=None):
     parts = {name: round(raw[name] * weights[name], 1) for name in raw}
     return {"score": round(sum(raw[name] * weights[name] for name in raw)), "parts": parts,
             "weights": {name: round(w, 1) for name, w in weights.items()}}
+
+
+# ----------------------------------------------------------- auto-filter
+
+FILTER_GROUPS = [("filter_seasonal", "Seasonal"), ("filter_gated", "Gated or hard to source")]
+
+
+def _filter_terms(text):
+    return [t.strip().lower() for t in re.split(r"[,\n]", text or "") if t.strip()]
+
+
+def filter_matches(product, settings):
+    """Reasons to remove a product: whole-word matches of the filter lists in its name or category."""
+    text = f"{product.get('name') or ''} {product.get('category') or ''}".lower().replace("\u2019", "'")
+    reasons = []
+    for key, label in FILTER_GROUPS:
+        terms = _filter_terms(settings.get(key) if settings.get(key) is not None else DEFAULT_SETTINGS[key])
+        hits = [t for t in terms if re.search(r"(?<![a-z0-9])" + re.escape(t) + r"(?:e?s)?(?![a-z0-9])", text)]
+        if hits:
+            reasons.append({"group": label, "terms": hits[:3]})
+    return reasons
 
 
 # ------------------------------------------------------ profit potential

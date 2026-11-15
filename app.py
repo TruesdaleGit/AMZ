@@ -68,6 +68,7 @@ def build_state(conn, days=30):
         product["min_price"] = logic.min_price_for_margin(product, quote, settings)
         product["scenarios"] = logic.price_scenarios(product, quote, settings)
         product["potential"] = logic.profit_potential(product, eco, quote, settings)
+        product["filter_reasons"] = [] if product["status"] == "dropped" else logic.filter_matches(product, settings)
         product["quote_count"] = len(quotes_by_product.get(product["id"], []))
         product["active_quote_id"] = quote["id"] if quote else None
 
@@ -823,6 +824,11 @@ class Handler(BaseHTTPRequestHandler):
             return import_products(conn, data.get("csv") or "")
         if method == "POST" and route == "import/sales":
             return import_sales(conn, data.get("csv") or "")
+        if method == "POST" and route == "products/drop":
+            ids = [int(i) for i in data.get("ids") or [] if str(i).isdigit()]
+            for product_id in ids:
+                conn.execute("UPDATE products SET status = 'dropped' WHERE id = ?", (product_id,))
+            return {"dropped": len(ids)}
         if method == "POST" and route == "products/shortlist-proceed":
             return shortlist_proceed(conn)
         if method == "POST" and route == "import/keywords":
