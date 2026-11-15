@@ -103,6 +103,30 @@ class Additions(unittest.TestCase):
         self.assertEqual(demand_only["score"], 100)
         self.assertLess(default["score"], 60)
 
+    def test_profit_potential_verdicts_and_ranking(self):
+        def analyse(**fields):
+            product = {"price": 30, "monthly_sales": 600, "reviews": 150, "rating": 4.2, "weight_lb": 0.6, "status": "idea", **fields}
+            eco = logic.unit_economics(product, {"unit_cost": 4}, SETTINGS)
+            product["potential"] = logic.profit_potential(product, eco, {"unit_cost": 4, "moq": 500}, SETTINGS)
+            return product
+        good = analyse()
+        # 600 x 30% share = 180 units; 30 - 4.50 - 4.15 - 4 - 0.90 - 4.50 ads = 11.95
+        self.assertEqual((good["potential"]["est_units"], good["potential"]["unit_profit_after_ads"]), (180, 11.95))
+        self.assertEqual(good["potential"]["monthly_profit"], 2151.0)
+        self.assertEqual(good["potential"]["investment"], 500 * 4 + 1000)
+        self.assertEqual(good["potential"]["verdict"], "proceed")
+        crowded = analyse(reviews=9000)
+        self.assertLess(crowded["potential"]["est_units"], 60)          # share shrinks in a crowded niche
+        self.assertEqual(analyse(price=9)["potential"]["verdict"], "skip")         # loses money after ads
+        self.assertEqual(analyse(monthly_sales=30)["potential"]["verdict"], "skip")  # too little demand
+        no_weight = analyse(weight_lb=0)
+        self.assertEqual(no_weight["potential"]["verdict"], "investigate")  # overstated profit must not rank as Proceed
+        dropped = analyse(status="dropped")
+        ranked = logic.rank_products([no_weight, crowded, good, dropped])
+        self.assertEqual([p["potential"]["rank"] for p in ranked], [1, 2, 3])
+        self.assertIs(ranked[0], good)
+        self.assertNotIn(dropped, ranked)
+
     def test_keyword_priority_order(self):
         self.assertGreater(logic.keyword_priority(12000, 300), logic.keyword_priority(12000, 30000))
         self.assertGreater(logic.keyword_priority(12000, 300), logic.keyword_priority(300, 300))

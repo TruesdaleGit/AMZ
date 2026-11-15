@@ -67,8 +67,11 @@ def build_state(conn, days=30):
         product["score"] = logic.opportunity_score(product, eco, settings)
         product["min_price"] = logic.min_price_for_margin(product, quote, settings)
         product["scenarios"] = logic.price_scenarios(product, quote, settings)
+        product["potential"] = logic.profit_potential(product, eco, quote, settings)
         product["quote_count"] = len(quotes_by_product.get(product["id"], []))
         product["active_quote_id"] = quote["id"] if quote else None
+
+    logic.rank_products(products)
 
     versions = db.rows(conn, "SELECT id, listing_id, saved_at, label FROM listing_versions ORDER BY id DESC")
     for listing in listings:
@@ -545,6 +548,30 @@ def save_upload(data):
 EXPORT_SKIP = {"listing_versions", "reviews"}
 
 
+def export_ranking(conn):
+    ranked = logic.rank_products(build_state(conn, 0)["products"])
+    headers = ["Rank", "Product", "Verdict", "Reason", "Est. units / month", "Share of top seller %", "Profit / unit after ads",
+               "Margin after ads %", "Est. monthly profit", "First order units", "Investment", "Payback months",
+               "Annual ROI %", "Things to check", "Status"]
+    rows = []
+    for p in ranked:
+        x = p["potential"]
+        rows.append([x["rank"], p["name"], x["verdict"], x["why"], x["est_units"], x["share_pct"], x["unit_profit_after_ads"],
+                     x["margin_after_ads_pct"], x["monthly_profit"], x["first_order"], x["investment"], x["payback_months"],
+                     x["annual_roi_pct"], "; ".join(x["flags"]), p["status"]])
+    return xlsx.workbook(headers, rows, "Profit ranking")
+
+
+def shortlist_proceed(conn):
+    """Move every idea-stage product with a Proceed verdict to the shortlist."""
+    moved = 0
+    for p in build_state(conn, 0)["products"]:
+        if p["status"] == "idea" and p["potential"]["verdict"] == "proceed":
+            conn.execute("UPDATE products SET status = 'shortlist' WHERE id = ?", (p["id"],))
+            moved += 1
+    return {"moved": moved}
+
+
 def export_table(conn, table):
     """One table as an Excel workbook, with names in place of internal ids."""
     if table not in db.TABLES or table in EXPORT_SKIP:
@@ -773,6 +800,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, site_zip(), "application/zip",
                        {"Content-Disposition": 'attachment; filename="storefront.zip"'})
             return None
+        if method == "GET" and route == "export/ranking.xlsx":
+            self._send(200, export_ranking(conn), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       {"Content-Disposition": 'attachment; filename="profit-ranking.xlsx"'})
+            return None
         if method == "GET" and len(parts) == 2 and parts[0] == "export" and parts[1].endswith(".xlsx"):
             table = parts[1][:-5]
             self._send(200, export_table(conn, table),
@@ -792,6 +823,8 @@ class Handler(BaseHTTPRequestHandler):
             return import_products(conn, data.get("csv") or "")
         if method == "POST" and route == "import/sales":
             return import_sales(conn, data.get("csv") or "")
+        if method == "POST" and route == "products/shortlist-proceed":
+            return shortlist_proceed(conn)
         if method == "POST" and route == "import/keywords":
             return import_keywords(conn, data.get("product_id"), data.get("csv") or "")
         if method == "POST" and route == "import/ads":

@@ -304,7 +304,8 @@ views.find = () => {
     <p class="lede">Add product ideas or import a CSV exported from a research tool. Each idea is scored on demand, competition, price, margin and size so you can compare them on one scale. Score weights are under Settings.</p>
     <div class="bar"><button class="btn primary" data-add="products">Add product idea</button>
       <button class="btn" data-act="import-products">Import CSV</button>
-      <button class="btn" data-act="compare">Compare selected</button><span class="grow"></span>${xl("products")}</div>
+      <button class="btn" data-act="compare">Compare selected</button>
+      <button class="btn" data-act="go-ranking">Rank by profit potential</button><span class="grow"></span>${xl("products")}</div>
     <div class="bar filters"><input type="text" data-find="q" value="${esc(f.q)}" placeholder="Search name, category or ASIN" aria-label="Search">
       <select data-find="status" aria-label="Status filter"><option value="">All statuses</option>${options(STATUSES, f.status)}</select>
       <label style="margin:0">Min score</label><input type="number" data-find="min" value="${f.min}" min="0" max="100" style="width:80px" aria-label="Minimum score"></div>
@@ -569,6 +570,7 @@ const actions = {
   "import-products": () => pickCsv((csv) => run(() => api("POST", "import/products", { csv }), (r) => `Imported ${plural(r.added, "product")}`
     + (r.duplicates ? `, skipped ${plural(r.duplicates, "duplicate")}` : "") + (r.skipped ? `, skipped ${r.skipped} without a name` : "") + `. Columns read: ${r.columns_used.join(", ")}`)),
   "compare": compareDialog,
+  "go-ranking": () => { ui.view = "ranking"; render(); window.scrollTo(0, 0); },
   "add-quote": () => (S.suppliers.length ? openTable("quotes") : toast("Add a supplier first.", true)),
   "outreach": async () => {
     try {
@@ -632,7 +634,7 @@ main.addEventListener("change", (event) => {
     const value = t.type === "checkbox" || t.type === "radio" ? (t.checked ? 1 : 0) : t.value;
     return run(() => api("PUT", `${table}/${id}`, { [field]: value }));
   }
-  if (t.closest("#store") || t.closest("#cash")) return run(() => api("PUT", "settings", { [t.name]: t.value }));
+  if (t.closest("#store") || t.closest("#cash") || t.closest("#rankcfg")) return run(() => api("PUT", "settings", { [t.name]: t.value }));
   if (d.ui) { ui[d.ui] = Number(t.value); if (d.ui === "product") ui.outreach = ""; return render(); }
   if ("days" in d) { ui.days = Number(t.value); return load().catch((e) => toast(e.message, true)); }
 });

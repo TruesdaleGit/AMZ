@@ -23,6 +23,12 @@ DEFAULT_SETTINGS = {
     "company": "",
     # opportunity score weights (any scale; they are normalised to 100)
     "w_demand": "25", "w_competition": "25", "w_price": "15", "w_margin": "15", "w_rating": "10", "w_size": "10",
+    # profit ranking assumptions
+    "capture_share_pct": "30",     # share of a top seller's sales a new listing can reach
+    "launch_ad_pct": "15",         # ad cost as % of price while ranking
+    "launch_fixed_cost": "1000",   # photos, samples, inspection, design per product
+    "min_monthly_profit": "1000",  # below this a product is not worth launching
+    "default_first_order": "500",  # units, when there is no supplier quote
     # cash flow forecast
     "starting_cash": "0",
     "payout_delay_days": "14",
@@ -236,6 +242,93 @@ def opportunity_score(product, eco, settings=None):
     parts = {name: round(raw[name] * weights[name], 1) for name in raw}
     return {"score": round(sum(raw[name] * weights[name] for name in raw)), "parts": parts,
             "weights": {name: round(w, 1) for name, w in weights.items()}}
+
+
+# ------------------------------------------------------ profit potential
+
+VERDICT_ORDER = {"proceed": 0, "investigate": 1, "skip": 2}
+
+
+def profit_potential(product, eco, quote, settings):
+    """Estimate what launching this product could earn, and whether to proceed.
+
+    The imported sales figure belongs to an existing top seller, so a new
+    listing is assumed to reach only a share of it, smaller where the
+    incumbents have many reviews. Every figure here is an estimate.
+    """
+    price = num(product.get("price"))
+    sales = num(product.get("monthly_sales"))
+    reviews = num(product.get("reviews"))
+    rating = num(product.get("rating"))
+    known_size = num(product.get("weight_lb")) > 0 or num(product.get("fba_fee_override"), None) is not None
+
+    ease = _ramp(math.log10(max(reviews, 1)), math.log10(3000), math.log10(150)) if reviews else 0.5
+    share = num(settings.get("capture_share_pct"), 30) / 100 * (0.3 + 0.7 * ease)
+    units = sales * share
+    ad = price * num(settings.get("launch_ad_pct"), 15) / 100
+    unit_profit = round(eco["profit"] - ad, 2)
+    margin = round(unit_profit / price * 100, 1) if price else 0.0
+    monthly_profit = round(units * unit_profit, 2)
+
+    base_order = num(quote.get("moq")) if quote and num(quote.get("moq")) else num(settings.get("default_first_order"), 500)
+    first_order = int(max(base_order, math.ceil(units * 2)))
+    investment = round(first_order * eco["landed_cost"] + num(settings.get("launch_fixed_cost"), 1000), 2)
+    payback = round(investment / monthly_profit, 1) if monthly_profit > 0 else None
+    annual_roi = round(monthly_profit * 12 / investment * 100) if investment > 0 else 0
+    minimum = num(settings.get("min_monthly_profit"), 1000)
+
+    blockers, risks = [], []
+    if price <= 0:
+        blockers.append("No price")
+    if sales <= 0:
+        blockers.append("No sales estimate")
+    if not known_size:
+        blockers.append("No weight, so the FBA fee is missing and profit is overstated")
+    if eco["cost_source"] == "assumed":
+        risks.append("Product cost is assumed; get a supplier quote")
+    if not reviews:
+        risks.append("No review count, so competition is unknown")
+    elif reviews > 1500:
+        risks.append(f"Strong incumbents ({int(reviews):,} reviews)")
+    if rating >= 4.6:
+        risks.append(f"Hard to improve on a {rating:.1f} rating")
+    if 0 < price < 15:
+        risks.append("Low price leaves little room for ads")
+    if eco["size_tier"] == "bulky":
+        risks.append("Bulky: higher fees and freight")
+    if price > 0 and 0 < margin < 15:
+        risks.append(f"Thin margin after ads ({margin:.0f}%)")
+    if payback is not None and payback > 6:
+        risks.append(f"Slow payback ({payback:g} months)")
+
+    if price > 0 and unit_profit <= 0:
+        verdict, why = "skip", "Loses money on each sale after ads"
+    elif sales > 0 and known_size and monthly_profit < minimum * 0.25:
+        verdict, why = "skip", f"Estimated profit is far below your ${minimum:,.0f} a month minimum"
+    elif blockers:
+        verdict, why = "investigate", blockers[0]
+    elif monthly_profit < minimum:
+        verdict, why = "investigate", f"Estimated profit is below your ${minimum:,.0f} a month minimum"
+    elif margin < 15:
+        verdict, why = "investigate", "Margin after ads is under 15%"
+    elif payback is not None and payback > 6:
+        verdict, why = "investigate", "Takes more than 6 months to earn back the investment"
+    else:
+        verdict, why = "proceed", "Clears your profit minimum with a workable margin and payback"
+
+    return {"verdict": verdict, "why": why, "est_units": round(units), "share_pct": round(share * 100, 1),
+            "unit_profit_after_ads": unit_profit, "margin_after_ads_pct": margin, "monthly_profit": monthly_profit,
+            "first_order": first_order, "investment": investment, "payback_months": payback,
+            "annual_roi_pct": annual_roi, "flags": blockers + risks}
+
+
+def rank_products(products):
+    """Order products by verdict, then estimated monthly profit. Dropped products are left out."""
+    ranked = [p for p in products if p.get("status") != "dropped"]
+    ranked.sort(key=lambda p: (VERDICT_ORDER[p["potential"]["verdict"]], -p["potential"]["monthly_profit"]))
+    for position, product in enumerate(ranked, 1):
+        product["potential"]["rank"] = position
+    return ranked
 
 
 # ------------------------------------------------------------- keywords

@@ -178,7 +178,48 @@ views.cashflow = () => {
       <p class="muted small">The first row covers the rest of this month. Payouts assume your recent sales pace continues and that you do not run out of stock; product cost appears as order payments, not per sale. Past-dated order payments are treated as already paid.</p></div>`;
 };
 
+views.ranking = () => {
+  const st = S.settings;
+  const list = S.products.filter((p) => p.status !== "dropped").sort((a, b) => a.potential.rank - b.potential.rank);
+  if (!list.length) return needProduct("Profit ranking");
+  const count = (v) => list.filter((p) => p.potential.verdict === v).length;
+  const pill = { proceed: "good", investigate: "warn", skip: "bad" };
+  const cfg = (name, label) => `<div><label>${label}</label><input type="number" step="any" name="${name}" value="${esc(st[name])}"></div>`;
+  const rows = list.map((p) => {
+    const x = p.potential;
+    return `<tr class="click" data-edit="products:${p.id}"><td class="num">${x.rank}</td>
+      <td class="wrap"><strong>${esc(p.name)}</strong><div class="muted small">${esc(x.why)}</div></td>
+      <td><span class="pill ${pill[x.verdict]}">${x.verdict}</span></td>
+      <td class="num">${int(x.est_units)}<div class="muted small">${x.share_pct}% of ${int(p.monthly_sales)}</div></td>
+      <td class="num ${x.unit_profit_after_ads < 0 ? "neg" : ""}">${money(x.unit_profit_after_ads)}<div class="muted small">${pct(x.margin_after_ads_pct)}</div></td>
+      <td class="num ${x.monthly_profit < 0 ? "neg" : ""}"><strong>${money(x.monthly_profit)}</strong></td>
+      <td class="num">${money(x.investment)}<div class="muted small">${int(x.first_order)} units</div></td>
+      <td class="num">${x.payback_months === null ? "–" : x.payback_months + " mo"}</td><td class="num">${x.monthly_profit > 0 ? int(x.annual_roi_pct) + "%" : "–"}</td>
+      <td class="wrap small muted">${x.flags.map(esc).join("<br>") || "Nothing flagged"}</td>
+      <td><select data-set="products:${p.id}:status" aria-label="Status">${options(STATUSES, p.status)}</select></td></tr>`;
+  }).join("");
+  const top = list.filter((p) => p.potential.verdict !== "skip").slice(0, 12)
+    .map((p) => ({ label: p.name, value: p.potential.monthly_profit, tip: `${p.name}|Est. ${money(p.potential.monthly_profit)} a month|${p.potential.verdict} · ${int(p.potential.est_units)} units · payback ${p.potential.payback_months ?? "–"} months` }));
+  const ideas = list.filter((p) => p.status === "idea" && p.potential.verdict === "proceed").length;
+  return `<h1>Profit ranking</h1>
+    <p class="lede">Every product idea, ranked by what it could earn you each month. The sales figure you imported belongs to an existing top seller, so the estimate gives a new listing only a share of it, smaller where incumbents have many reviews, and takes ad costs off the profit. Products are grouped Proceed, then Investigate, then Skip, and sorted by estimated monthly profit within each.</p>
+    <div class="card"><h2>Assumptions</h2><form id="rankcfg" class="fields three">
+      ${cfg("capture_share_pct", "Share of a top seller's sales you can reach (%)")}${cfg("launch_ad_pct", "Ad cost while launching (% of price)")}
+      ${cfg("min_monthly_profit", "Minimum monthly profit worth launching ($)")}${cfg("launch_fixed_cost", "Launch costs per product: photos, samples ($)")}
+      ${cfg("default_first_order", "First order when there is no quote (units)")}</form>
+      <p class="muted small" style="margin:10px 0 0">Changing a figure re-ranks everything. The share is reduced further for crowded niches: full share at 150 reviews or fewer, down to 30% of it at 3,000 or more.</p></div>
+    <div class="tiles">${tile("Proceed", count("proceed"), "clear your minimum")}${tile("Investigate", count("investigate"), "borderline or missing data")}
+      ${tile("Skip", count("skip"), "not worth launching")}</div>
+    <div class="bar">${ideas ? `<button class="btn primary" data-act="shortlist-proceed">Shortlist the ${ideas} Proceed idea${ideas === 1 ? "" : "s"}</button>` : ""}
+      <span class="grow"></span><a class="btn" href="/api/export/ranking.xlsx">Export to Excel</a></div>
+    ${top.length ? `<div class="card"><h2>Estimated monthly profit, top ${top.length}</h2>${hbar(top, "Estimated monthly profit by product")}</div>` : ""}
+    <div class="card scroll"><table><thead><tr><th class="num">#</th><th>Product</th><th>Verdict</th><th class="num">Est. units / mo</th><th class="num">Profit / unit after ads</th>
+      <th class="num">Est. monthly profit</th><th class="num">Investment</th><th class="num">Payback</th><th class="num">Yearly return</th><th>Things to check</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>
+      <p class="muted small">These are estimates built on third-party sales figures and the assumptions above, not forecasts. Use the ranking to choose which products to research further: get a real supplier quote, check the reviews, and confirm the FBA fee before ordering. Dropped products are hidden.</p></div>`;
+};
+
 Object.assign(actions, {
+  "shortlist-proceed": () => run(() => api("POST", "products/shortlist-proceed", {}), (r) => `Moved ${plural(r.moved, "product")} to the shortlist`),
   "import-keywords": () => pickCsv((csv) => run(() => api("POST", "import/keywords", { csv, product_id: current().id }),
     (r) => `Imported ${plural(r.added, "keyword")}` + (r.duplicates ? `, skipped ${plural(r.duplicates, "duplicate")}` : "") + `. Columns read: ${r.columns_used.join(", ")}`)),
   "keywords-to-listing": () => run(() => api("POST", "keywords/to-listing", { product_id: current().id, count: 15 }), (r) => `Top ${r.count} keywords sent to the listing inputs`),
