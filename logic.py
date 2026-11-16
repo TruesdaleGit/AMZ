@@ -732,7 +732,7 @@ SHORT_TITLE_MAX = 45
 
 
 def short_title(title, brand=""):
-    """A short product name from a long Amazon title: the first phrase, at most six words."""
+    """A short product name from a long Amazon title: its first phrase, cut to about 45 characters."""
     title = " ".join((title or "").split())
     brand = " ".join((brand or "").split())
     text = title
@@ -744,11 +744,11 @@ def short_title(title, brand=""):
     if len(first.split()) < 2:   # the title opens with a one-word phrase, such as a brand; keep going
         rest = _TITLE_BREAK.split(text, 2)
         first = " ".join(part.strip() for part in rest[:2]).strip()
-        limit = 7
-    else:
-        limit = 6
-    words = first.split()[:limit]
-    while len(words) > 3 and len(" ".join(words)) > SHORT_TITLE_MAX:
+    at = first.lower().find(" for ")   # "... for Dogs & Cats" says who it is for, not what it is
+    if len(first) > SHORT_TITLE_MAX and at > 0 and len(first[:at].split()) >= 2:
+        first = first[:at]
+    words = first.split()
+    while len(words) > 2 and len(" ".join(words)) > SHORT_TITLE_MAX:
         words.pop()
     while len(words) > 1 and words[-1].lower() in _TRAILING:
         words.pop()

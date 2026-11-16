@@ -2,14 +2,22 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Seller Toolkit</title>
-<link rel="stylesheet" href="/static/style.css">
+<meta name="theme-color" content="#1f5f4a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Seller Toolkit">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="static/style.css">
 </head>
 <body>
 <div class="shell">
   <nav class="side" aria-label="Sections">
-    <div class="brand">Seller Toolkit</div>
+    <div class="brand"><span>Seller Toolkit</span><button type="button" class="menu" data-menu aria-expanded="false">Menu</button></div>
     <div class="group">Research</div>
     <button data-view="find">Find products</button>
     <button data-view="ranking">Profit ranking</button>
@@ -34,8 +42,12 @@
 <dialog id="dlg"></dialog>
 <div id="toast" role="status" aria-live="polite"></div>
 <div id="tip" class="tip" hidden></div>
-<input type="file" id="file" accept=".csv,.tsv,.txt,text/csv" hidden>
-<script src="/static/app.js"></script>
-<script src="/static/views2.js"></script>
+<input type="file" id="file" hidden>
+<!-- mode.js says where the data lives: the PC app answers it with SERVER_MODE = true; on the web it is false. -->
+<script src="static/mode.js"></script>
+<script src="static/core.js"></script>
+<script src="static/backend.js"></script>
+<script src="static/app.js"></script>
+<script src="static/views2.js"></script>
 </body>
 </html>

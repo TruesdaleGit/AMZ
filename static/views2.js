@@ -211,7 +211,7 @@ views.ranking = () => {
     <div class="tiles">${tile("Proceed", count("proceed"), "clear your minimum")}${tile("Investigate", count("investigate"), "borderline or missing data")}
       ${tile("Skip", count("skip"), "not worth launching")}</div>
     <div class="bar">${ideas ? `<button class="btn primary" data-act="shortlist-proceed">Shortlist the ${ideas} Proceed idea${ideas === 1 ? "" : "s"}</button>` : ""}
-      <span class="grow"></span><a class="btn" href="/api/export/ranking.xlsx">Export to Excel</a></div>
+      <span class="grow"></span><a class="btn" href="api/export/ranking.xlsx">Export to Excel</a></div>
     ${top.length ? `<div class="card"><h2>Estimated monthly profit, top ${top.length}</h2>${hbar(top, "Estimated monthly profit by product")}</div>` : ""}
     <div class="card scroll"><table><thead><tr><th class="num">#</th><th>Product</th><th>Verdict</th><th class="num">Est. units / mo</th><th class="num">Profit / unit after ads</th>
       <th class="num">Est. monthly profit</th><th class="num">Investment</th><th class="num">Payback</th><th class="num">Yearly return</th><th>Things to check</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>
@@ -238,3 +238,8 @@ Object.assign(actions, {
 });
 
 load().catch((error) => { main.innerHTML = `<div class="card">Could not load: ${esc(error.message)}</div>`; });
+
+// The web version works offline once opened: the service worker keeps a copy of the app's files.
+if (WEB && "serviceWorker" in navigator && location.protocol !== "file:") navigator.serviceWorker.register("sw.js").catch(() => {});
+// Ask the browser not to clear this app's data when the device runs low on space.
+if (WEB && navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});

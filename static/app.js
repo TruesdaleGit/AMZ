@@ -26,7 +26,8 @@ const product = (id) => S.products.find((p) => p.id === Number(id));
 const current = () => product(ui.product) || S.products[0];
 const options = (items, selected, label = (i) => i.name) =>
   items.map((i) => `<option value="${esc(i.id ?? i)}" ${String(i.id ?? i) === String(selected ?? "") ? "selected" : ""}>${esc(i.id !== undefined ? label(i) : i)}</option>`).join("");
-const xl = (table) => `<a class="btn" href="/api/export/${table}.xlsx">Export to Excel</a>`;
+const xl = (table) => `<a class="btn" href="api/export/${table}.xlsx">Export to Excel</a>`;
+const WEB = !window.SERVER_MODE;   // true when the data lives in this browser (iPhone, GitHub Pages)
 const meter = (value) => `<span class="meter"><span>${value}</span><i><b style="width:${Math.max(0, Math.min(100, value))}%"></b></i></span>`;
 const tile = (k, v, s = "") => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></div>`;
 const needProduct = (title) => `<h1>${title}</h1><div class="card empty">Add a product idea under Find products first.</div>`;
@@ -36,7 +37,7 @@ const productBar = (extra = "") => `<div class="bar"><label style="margin:0">Pro
 // Thumbnail, short title, Amazon link and description for a product row.
 function productCell(p, note = "") {
   const asin = /^[A-Z0-9]{10}$/.test((p.asin || "").trim().toUpperCase()) ? p.asin.trim().toUpperCase() : "";
-  const src = /^(https?:\/\/|\/uploads\/)/.test(p.thumb_url || "") ? p.thumb_url : asin ? `https://images-na.ssl-images-amazon.com/images/P/${asin}.01._SL160_.jpg` : "";
+  const src = /^(https?:\/\/|\/uploads\/|data:image\/)/.test(p.thumb_url || "") ? p.thumb_url : asin ? `https://images-na.ssl-images-amazon.com/images/P/${asin}.01._SL160_.jpg` : "";
   const link = /^https?:\/\//.test(p.link || "") ? `<a class="small" href="${esc(p.link)}" target="_blank" rel="noopener noreferrer">View on Amazon ↗</a>` : "";
   return `<div class="pcell"><span class="pthumb">${src ? `<img src="${esc(src)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : ""}</span>
     <div><strong>${esc(p.name)}</strong>
@@ -57,7 +58,12 @@ function toast(message, isError) {
 }
 
 async function api(method, path, body) {
-  const response = await fetch("/api/" + path, {
+  if (WEB) {
+    const result = await Backend.request(method, path, body);
+    if (result.status >= 400) throw new Error((result.data && result.data.error) || "Request failed (" + result.status + ")");
+    return result.data;
+  }
+  const response = await fetch("api/" + path, {
     method,
     headers: body ? { "Content-Type": "application/json" } : {},
     body: body ? JSON.stringify(body) : undefined,
@@ -103,12 +109,51 @@ function uploadImage() {
   return new Promise((resolve) => pickFile((file) => {
     const reader = new FileReader();
     reader.onload = async () => {
-      try { resolve((await api("POST", "upload", { name: file.name, data: reader.result })).url); }
-      catch (error) { toast(error.message, true); }
+      try {
+        const data = WEB ? await shrinkImage(reader.result) : reader.result;
+        resolve((await api("POST", "upload", { name: WEB ? "photo.jpg" : file.name, data })).url);
+      } catch (error) { toast(error.message, true); }
     };
     reader.readAsDataURL(file);
   }, "image/png,image/jpeg,image/webp,image/gif"));
 }
+// On the web a photo is kept inside the app's data, so it is scaled down to at most 1400 px first.
+function shrinkImage(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, 1400 / Math.max(img.width, img.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(img.width * scale); canvas.height = Math.round(img.height * scale);
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL("image/jpeg", 0.85));
+    };
+    img.onerror = () => reject(new Error("That file could not be read as an image."));
+    img.src = dataUrl;
+  });
+}
+// Save a file made in the browser: the share sheet on phones, a normal download elsewhere.
+async function saveFile(file) {
+  const blob = new Blob([file.bytes], { type: file.type });
+  const shareable = typeof File !== "undefined" && new File([blob], file.name, { type: file.type });
+  if (navigator.maxTouchPoints > 0 && navigator.canShare && shareable && navigator.canShare({ files: [shareable] })) {
+    try { await navigator.share({ files: [shareable] }); return; } catch (e) { if (e.name === "AbortError") return; }
+  }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = file.name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+}
+// On the web there is no server behind the export links, so they are answered here.
+document.addEventListener("click", async (event) => {
+  const link = event.target.closest && event.target.closest('a[href^="api/"]');
+  if (!WEB || !link) return;
+  event.preventDefault();
+  const result = await Backend.request("GET", link.getAttribute("href").slice(4));
+  if (result.file) saveFile(result.file); else toast((result.data && result.data.error) || "Could not create the file.", true);
+});
 
 // fields: [{name, label, type, options, full, hint}]
 function fieldHtml(f, value) {
@@ -116,8 +161,10 @@ function fieldHtml(f, value) {
   let input;
   if (f.type === "select") input = `<select name="${f.name}">${f.blank ? `<option value="">${esc(f.blank)}</option>` : ""}${options(f.options, v)}</select>`;
   else if (f.type === "textarea") input = `<textarea name="${f.name}" rows="${f.rows || 3}" placeholder="${esc(f.hint || "")}">${esc(v)}</textarea>`;
-  else if (f.type === "image") input = `<div class="pair"><input type="text" name="${f.name}" value="${esc(v)}" placeholder="https://… or upload"><button type="button" class="btn" data-upload="${f.name}">Upload</button></div>`;
-  else if (f.type === "images") input = `<textarea name="${f.name}" rows="4" placeholder="One image per line">${esc(v)}</textarea><button type="button" class="btn small" data-upload="${f.name}" data-append style="margin-top:6px">Upload and add</button>`;
+  else if (f.type === "image" || f.type === "images") input = `<div class="photos" data-photos="${f.name}" ${f.type === "images" ? "data-many" : ""}>
+    <textarea name="${f.name}" hidden>${esc(v)}</textarea><div class="plist"></div>
+    <button type="button" class="btn small" data-photo-add="upload">${f.type === "images" ? "Add photo" : "Choose photo"}</button>
+    <button type="button" class="btn small" data-photo-add="link">${f.type === "images" ? "Add by link" : "Use a link"}</button></div>`;
   else input = `<input type="${f.type || "text"}" name="${f.name}" value="${esc(v)}" ${f.type === "number" ? 'step="any"' : ""} placeholder="${esc(f.hint || "")}" ${f.required ? "required" : ""}>`;
   return `<div class="${f.full ? "full" : ""}"><label>${esc(f.label)}</label>${input}</div>`;
 }
@@ -129,6 +176,7 @@ function openForm(title, fields, values, onSave, extra = "", onDelete = null) {
       <button type="button" class="btn" data-cancel>Cancel</button>
       <button class="btn primary" value="save">Save</button></div></form>`;
   const form = dlg.querySelector("form");
+  dlg.querySelectorAll("[data-photos]").forEach(drawPhotos);
   dlg.querySelector("[data-cancel]").onclick = () => dlg.close();
   if (onDelete) dlg.querySelector("[data-del]").onclick = () => { if (confirm("Delete this? It cannot be undone.")) { dlg.close(); onDelete(); } };
   form.onsubmit = (event) => { event.preventDefault(); dlg.close(); onSave(formValues(form)); };
@@ -154,12 +202,26 @@ dlg.addEventListener("click", (event) => {
   pressedOutside = false;
 });
 
+// Photo fields: the value is one image address per line, shown as thumbnails.
+const photoList = (box) => box.querySelector("textarea").value.split("\n").map((u) => u.trim()).filter(Boolean);
+function drawPhotos(box) {
+  const urls = photoList(box);
+  box.querySelector(".plist").innerHTML = urls.map((u, i) => `<span class="pitem">${/^(https?:\/\/|\/uploads\/|data:image\/)/.test(u) ? `<img src="${esc(u)}" alt="Photo ${i + 1}">` : ""}<button type="button" data-photo-remove="${i}" aria-label="Remove photo ${i + 1}">×</button></span>`).join("")
+    || '<span class="muted small">No photo yet</span>';
+}
 dlg.addEventListener("click", async (event) => {
-  const button = event.target.closest("[data-upload]");
-  if (!button) return;
-  const field = dlg.querySelector(`[name="${button.dataset.upload}"]`);
-  const url = await uploadImage();
-  field.value = button.hasAttribute("data-append") ? (field.value.trim() ? field.value.trim() + "\n" : "") + url : url;
+  const box = event.target.closest("[data-photos]");
+  if (!box) return;
+  const field = box.querySelector("textarea"), many = box.hasAttribute("data-many");
+  const remove = event.target.closest("[data-photo-remove]"), add = event.target.closest("[data-photo-add]");
+  if (remove) field.value = photoList(box).filter((u, i) => i !== Number(remove.dataset.photoRemove)).join("\n");
+  else if (add) {
+    const url = add.dataset.photoAdd === "upload" ? await uploadImage() : (prompt("Paste the link to the image") || "").trim();
+    if (!url) return;
+    if (!/^(https?:\/\/|\/uploads\/|data:image\/)/.test(url)) return toast("That does not look like an image link.", true);
+    field.value = many ? photoList(box).concat(url).join("\n") : url;
+  } else return;
+  drawPhotos(box);
 });
 
 // Horizontal bars from a zero baseline. items: [{label, value, tip}]
@@ -485,7 +547,7 @@ views.list = () => {
     <button type="button" class="btn small danger" data-act="delete-version" data-id="${v.id}">Delete</button></td></tr>`).join("");
   return `<h1>Amazon listings</h1>
     <p class="lede">Enter features and keywords, generate a first draft, then edit it. The checker flags anything that breaks Amazon's general length and style rules. Export produces a tab-separated file to copy into the category template from Seller Central.</p>
-    ${productBar(`<a class="btn" href="/api/export/flatfile">Export flat file</a>${xl("listings")}`)}
+    ${productBar(`<a class="btn" href="api/export/flatfile">Export flat file</a>${xl("listings")}`)}
     <form id="listing"><div class="cols">
       <div><div class="card"><h2>Inputs</h2>
         <div class="fields"><div><label>Brand</label><input type="text" name="brand" value="${esc(l.brand)}"></div>
@@ -540,7 +602,7 @@ views.site = () => {
       <div class="full"><label>Contact page text</label><textarea name="contact_text" rows="2">${esc(st.contact_text)}</textarea></div></form></div>
     <div class="card scroll">${rows ? `<table><thead><tr><th>Show</th><th>Product</th><th>Photos</th><th>Checkout link</th><th>Amazon link</th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="empty">Add a product idea first.</div>'}</div>
     <div class="bar"><button class="btn primary" data-act="build-site">Build website</button>
-      ${S.site_built ? '<a class="btn" href="/store/index.html" target="_blank" rel="noopener">Open preview</a><a class="btn" href="/api/site/zip">Download as zip</a>' : ""}</div>
+      ${S.site_built ? (WEB ? "" : '<a class="btn" href="store/index.html" target="_blank" rel="noopener">Open preview</a>') + '<a class="btn" href="api/site/zip">Download as zip</a>' : ""}</div>
     ${built ? `<div class="card"><h2>Built ${built.pages.length} page${built.pages.length === 1 ? "" : "s"} for ${built.products} product${built.products === 1 ? "" : "s"}</h2>
       <p class="muted small">Folder: ${esc(built.folder)}</p>
       ${built.warnings.length ? `<ul class="issues">${built.warnings.map((w) => `<li><span class="pill warn">Check</span><span>${esc(w)}</span></li>`).join("")}</ul>` : ""}</div>` : ""}`;
@@ -648,10 +710,16 @@ const SETTING_GROUPS = [
 views.settings = () => `<h1>Settings</h1>
   <p class="lede">These defaults drive every profit figure. FBA fees are estimated from weight and size and Amazon changes its fee tables, so enter the real fee on a product once you know it. Your data is backed up to the backups folder each time the app starts.</p>
   <form id="settings">${SETTING_GROUPS.map(([title, fields]) => `<div class="card"><h2>${title}</h2><div class="fields">${fields.map((f) => fieldHtml(f, S.settings[f.name])).join("")}</div></div>`).join("")}
-    <div class="actions"><button type="button" class="btn primary" data-act="save-settings">Save settings</button></div></form>`;
+    <div class="actions"><button type="button" class="btn primary" data-act="save-settings">Save settings</button></div></form>
+  <div class="card"><h2>Backup and moving data between devices</h2>
+    <p class="muted" style="margin-top:0">${WEB ? "On this device your data is kept in this browser's storage, not on a server. Download a backup now and then: if the browser's website data is cleared, the backup is the only copy." : "Your data is in data.db on this PC and is copied to the backups folder each time the app starts."}
+      A backup file holds everything: products, quotes, listings, sales and settings. To copy your data to another device, download a backup here and restore it there.</p>
+    <div class="bar" style="margin:0"><a class="btn" href="api/backup">Download backup</a><button type="button" class="btn" data-act="restore-backup">Restore from a backup file</button></div></div>`;
 
 function render() {
-  document.querySelectorAll(".side button").forEach((b) => b.classList.toggle("on", b.dataset.view === ui.view));
+  document.querySelectorAll(".side button[data-view]").forEach((b) => b.classList.toggle("on", b.dataset.view === ui.view));
+  const here = document.querySelector(`.side button[data-view="${ui.view}"]`);
+  document.querySelector(".side .menu").textContent = "Menu: " + (here ? here.textContent : "");
   // Saving an inline field redraws the page; put the cursor back where it was.
   const active = document.activeElement, focusKey = active && main.contains(active) ? active.dataset.set : null;
   main.innerHTML = views[ui.view]();
@@ -707,12 +775,24 @@ const actions = {
   },
   "build-site": () => run(async () => { ui.build = await api("POST", "site/build", {}); }, "Website built"),
   "import-sales": () => pickCsv((csv) => run(() => api("POST", "import/sales", { csv }), (r) => `Imported ${plural(r.added, "row")}` + (r.unmatched.length ? `. No matching product for: ${r.unmatched.join(", ")}` : ""))),
+  "restore-backup": () => pickFile(async (file) => {
+    let backup;
+    try { backup = JSON.parse(await file.text()); } catch (e) { return toast("That file is not a Seller Toolkit backup.", true); }
+    if (!confirm("Replace everything in the app on this device with the contents of this backup?")) return;
+    run(() => api("POST", "restore", { backup }), (r) => `Backup restored: ${plural(r.products, "product")}`);
+  }, ".json,application/json"),
   "save-settings": () => run(() => api("PUT", "settings", formValues(document.getElementById("settings"))), "Settings saved"),
 };
 
-document.querySelector(".side").addEventListener("click", (event) => {
+const side = document.querySelector(".side");
+side.addEventListener("click", (event) => {
+  const menu = event.target.closest("[data-menu]");
+  if (menu) { menu.setAttribute("aria-expanded", String(side.classList.toggle("open"))); return; }
   const button = event.target.closest("[data-view]");
-  if (button) { ui.view = button.dataset.view; render(); window.scrollTo(0, 0); }
+  if (button) {
+    ui.view = button.dataset.view; side.classList.remove("open"); side.querySelector("[data-menu]").setAttribute("aria-expanded", "false");
+    render(); window.scrollTo(0, 0);
+  }
 });
 
 const rowOf = (table, id) => ({ quotes: S.quotes, products: S.products, suppliers: S.suppliers, overheads: S.overheads,

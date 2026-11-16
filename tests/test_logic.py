@@ -148,7 +148,9 @@ class Additions(unittest.TestCase):
         self.assertEqual(short("Under Sink Organizer"), "Under Sink Organizer")                 # already short
         self.assertEqual(short("ACME, Stainless Steel Pour Over Coffee Stand, Adjustable"), "ACME Stainless Steel Pour Over Coffee Stand")  # one-word lead is kept, so one more word
         self.assertEqual(short("Resistance Bands for Working Out with Handles and Door Anchor for Men and Women Home Gym"),
-                         "Resistance Bands for Working Out")
+                         "Resistance Bands")
+        self.assertEqual(short("PawCalm Dog Lick Mat with Suction Cups for Dogs & Cats, Slow Feeder Mat"), "PawCalm Dog Lick Mat with Suction Cups")
+        self.assertEqual(short("Halloween Costumes for Small Dogs - Pumpkin Outfit"), "Halloween Costumes for Small Dogs")
         self.assertLessEqual(len(short("Extraordinarily Supercalifragilistic Hyperdimensional Multifunctional Organizer Thing Extra Words")), 60)
         self.assertEqual(short(""), "")
 

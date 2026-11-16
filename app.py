@@ -556,6 +556,54 @@ def save_upload(data):
     return {"url": "/uploads/" + name}
 
 
+PHOTO_COLUMNS = {"products": ["image_url", "images", "thumb_url"], "quotes": ["sample_photo"]}
+
+
+def _inline_upload(url):
+    """Turn an uploaded photo's path into a data: URL so it travels inside a backup."""
+    path = os.path.join(UPLOAD_DIR, os.path.basename(url))
+    if not url.startswith("/uploads/") or not os.path.isfile(path) or os.path.getsize(path) > 2_000_000:
+        return url
+    kind = (mimetypes.guess_type(path)[0] or "image/jpeg")
+    with open(path, "rb") as f:
+        return f"data:{kind};base64," + base64.b64encode(f.read()).decode("ascii")
+
+
+def make_backup(conn):
+    """Everything in the app as one JSON document. The phone/web version reads and writes the same format."""
+    tables = {}
+    for table in db.TABLES:
+        tables[table] = db.rows(conn, f"SELECT * FROM {table} ORDER BY id")
+        for column in PHOTO_COLUMNS.get(table, []):
+            for row in tables[table]:
+                row[column] = "\n".join(_inline_upload(u) for u in (row[column] or "").split("\n"))
+    settings = {k: v for k, v in db.get_settings(conn).items() if k in logic.DEFAULT_SETTINGS}
+    return {"format": "seller-toolkit-backup", "version": 1,
+            "exported_at": datetime.datetime.now().isoformat(timespec="seconds"), "tables": tables, "settings": settings}
+
+
+def restore_backup(conn, backup):
+    """Replace all data with a backup's contents. The database file is copied to backups/ first."""
+    if not isinstance(backup, dict) or backup.get("format") != "seller-toolkit-backup" or not isinstance(backup.get("tables"), dict):
+        raise ApiError("That file is not a Seller Toolkit backup.")
+    conn.commit()
+    db.backup()
+    for table in reversed(list(db.TABLES)):
+        conn.execute(f"DELETE FROM {table}")
+    for table, columns in db.TABLES.items():
+        names = ["id"] + [c for c, _ in columns]
+        for row in backup["tables"].get(table) or []:
+            if not isinstance(row, dict) or not isinstance(row.get("id"), int):
+                continue
+            used = [c for c in names if c in row]
+            conn.execute(f"INSERT INTO {table} ({', '.join(used)}) VALUES ({', '.join('?' for _ in used)})",
+                         [row[c] for c in used])
+    for key, value in (backup.get("settings") or {}).items():
+        if key in logic.DEFAULT_SETTINGS:
+            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+    return {"ok": True, "products": conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]}
+
+
 EXPORT_SKIP = {"listing_versions", "reviews"}
 
 
@@ -662,7 +710,7 @@ def flat_file(conn):
         writer.writerow([clean(r["sku"]) or logic.slugify(r["name"]).upper(), clean(r["title"]), clean(r["brand"]),
                          f"{r['price'] or 0:.2f}", clean(r["bullet1"]), clean(r["bullet2"]), clean(r["bullet3"]),
                          clean(r["bullet4"]), clean(r["bullet5"]), clean(r["description"]),
-                         clean(r["search_terms"]), clean(r["image_url"])])
+                         clean(r["search_terms"]), "" if (r["image_url"] or "").startswith("data:") else clean(r["image_url"])])
     return out.getvalue()
 
 
@@ -785,8 +833,12 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(200, result)
             elif method != "GET":
                 self._send(405, {"error": "Method not allowed."})
-            elif not parts:
-                self._file(STATIC_DIR, "index.html")
+            elif not parts or parts == ["index.html"]:
+                self._file(ROOT, "index.html")
+            elif parts == ["static", "mode.js"]:   # tells the page its data lives in this app, not in the browser
+                self._send(200, "window.SERVER_MODE = true;\n", "text/javascript; charset=utf-8")
+            elif parts in (["manifest.json"], ["sw.js"]) or (parts[0] == "icons" and len(parts) == 2):
+                self._file(ROOT, "/".join(parts))
             elif parts[0] == "static":
                 self._file(STATIC_DIR, "/".join(parts[1:]))
             elif parts[0] == "uploads":
@@ -813,6 +865,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, site_zip(), "application/zip",
                        {"Content-Disposition": 'attachment; filename="storefront.zip"'})
             return None
+        if method == "GET" and route == "backup":
+            name = f"seller-toolkit-backup-{datetime.date.today().isoformat()}.json"
+            self._send(200, json.dumps(make_backup(conn)), "application/json",
+                       {"Content-Disposition": f'attachment; filename="{name}"'})
+            return None
         if method == "GET" and route == "export/ranking.xlsx":
             self._send(200, export_ranking(conn), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                        {"Content-Disposition": 'attachment; filename="profit-ranking.xlsx"'})
@@ -836,6 +893,8 @@ class Handler(BaseHTTPRequestHandler):
             return import_products(conn, data.get("csv") or "")
         if method == "POST" and route == "import/sales":
             return import_sales(conn, data.get("csv") or "")
+        if method == "POST" and route == "restore":
+            return restore_backup(conn, data.get("backup"))
         if method == "POST" and route == "products/drop":
             ids = [int(i) for i in data.get("ids") or [] if str(i).isdigit()]
             for product_id in ids:

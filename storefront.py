@@ -4,8 +4,10 @@ The output folder can be uploaded as-is to any static host (Netlify, Cloudflare
 Pages, GitHub Pages, S3). Checkout is a link per product: paste a Stripe Payment
 Link (or any checkout URL) on the product, or it falls back to the Amazon page.
 """
+import base64
 import html
 import json
+import re
 import os
 import shutil
 
@@ -117,9 +119,21 @@ class _Site:
         self.upload_dir = upload_dir
         self.nav = []
         self.warnings = []
+        self.pictures = {}
 
     def image(self, url, root):
         """Return the src to use in a page, copying uploaded files into the site."""
+        if url.startswith("data:"):   # a photo added on a phone, restored from a backup
+            if url not in self.pictures:
+                match = re.match(r"data:image/(png|jpe?g|webp|gif);base64,(.+)$", url, re.I | re.S)
+                if not match:
+                    return ""
+                name = f"photo-{len(self.pictures) + 1}.{match.group(1).lower().replace('jpeg', 'jpg')}"
+                os.makedirs(os.path.join(BUILD_DIR, "images"), exist_ok=True)
+                with open(os.path.join(BUILD_DIR, "images", name), "wb") as f:
+                    f.write(base64.b64decode(match.group(2)))
+                self.pictures[url] = name
+            return f"{root}images/{self.pictures[url]}"
         if url.startswith("/uploads/"):
             name = os.path.basename(url)
             source = os.path.join(self.upload_dir or "", name)

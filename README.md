@@ -3,7 +3,32 @@
 A local web app for private label selling on Amazon. It runs on your own computer,
 stores everything in one file (`data.db`), and needs nothing installed except Python.
 
-## Run it (Windows)
+## Two ways to use it
+
+| | On your Windows PC | On your iPhone (or any browser) |
+|---|---|---|
+| How it runs | A small Python program on the PC | A web app installed from Safari; no computer needed |
+| Where data lives | `data.db` in the app folder | The browser's storage on that device |
+| Works offline | Yes | Yes, after the first visit |
+| Updates | Double-click `Update Seller Toolkit.bat` | Automatic: the new version appears the second time you open it |
+
+The two keep **separate data**. Move it between them with **Settings > Download backup** on one
+and **Restore from a backup file** on the other. A restore replaces everything on the receiving device.
+
+## On your iPhone
+
+1. On GitHub, open this repository, then **Settings > Pages**.
+2. Under *Build and deployment*, set **Source: Deploy from a branch**, branch **main**, folder **/ (root)**, and **Save**.
+3. After about a minute, open `https://truesdalegit.github.io/AMZ/` in **Safari** on the iPhone.
+4. Tap **Share > Add to Home Screen**, then open Seller Toolkit from its icon.
+
+Your data on the phone lives in Safari's storage for that site. Download a backup now and then
+(Settings, at the bottom): if the website data is ever cleared, the backup is the only copy.
+
+Differences on the phone: the website builder has no live preview (use **Download as zip**), photos you add
+are shrunk and stored inside the app's data, and downloads open the iOS share sheet.
+
+## On your Windows PC
 
 Requires Python 3.9 or newer from https://www.python.org/downloads/ (tick
 **Add Python to PATH** during setup). No packages to install.
@@ -14,12 +39,6 @@ close it to stop.
 
 From Command Prompt instead: `python app.py`. To use another port:
 `set PORT=8800` and then `python app.py`.
-
-## Update it
-
-Double-click `Update Seller Toolkit.bat`. It downloads the latest version from
-https://github.com/TruesdaleGit/AMZ and replaces the program files. Your data
-(`data.db`) is never touched. Close and restart the app afterwards.
 
 To try it with example data, import `sample_data/products.csv` under **Find products**
 and `sample_data/sales.csv` under **Profit**.
@@ -72,13 +91,16 @@ folder each time the app starts (the newest 20 copies are kept).
 
 ## Files
 
-- `app.py`: web server and API
+- `index.html`, `static/`: the interface, shared by both versions
+- `static/core.js`, `static/backend.js`: the calculation engine and storage for the web version (a port of the Python below)
+- `manifest.json`, `sw.js`, `icons/`: make the web version installable and usable offline
+- `app.py`: web server and API for the PC version
 - `logic.py`: fee estimates, profit maths, scoring, listing checks, CSV parsing
 - `storefront.py`: static website builder
 - `db.py`: database schema
 - `xlsx.py`: Excel export
 - `update.py`: the updater
-- `static/`: the interface
 - `tests/test_logic.py`: run with `python tests\test_logic.py`
+- `tests/compare_engines.js`: runs the same actions through the Python and JavaScript engines and checks they agree (`node tests/compare_engines.js`)
 
 Your data lives in `data.db`, `uploads/` and `backups/`. Copy those to move to another PC.
